@@ -6,7 +6,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 SAVE_DIR = '/tmp/clipboard'
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-VERSION = '0.0.6'
+VERSION = '0.0.9'
 
 _ocr_engine = None
 

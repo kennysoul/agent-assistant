@@ -68,7 +68,7 @@ footer a{color:#666;text-decoration:none}
 </div>
 <div class="hint" id="hint">点选上方区域后 Cmd+V，或直接从 Finder 拖文件入来</div>
 <div class="result" id="result"></div>
-<footer>保存到 /tmp/clipboard/ | <a href="javascript:clearHistory()">清记录</a> | v<span id="ver">__VERSION__</span></footer>
+<footer>保存到 /tmp/clipboard/ | <a href="javascript:clearHistory()">清空目录</a> | v<span id="ver">__VERSION__</span></footer>
 
 <!-- OCR Modal -->
 <div id="ocr-modal">
@@ -109,16 +109,46 @@ zone.onclick = function() { zone.focus() };
 var saved = JSON.parse(localStorage.getItem('cb') || '[]');
 function saveHistory() { localStorage.setItem('cb', JSON.stringify(saved)) }
 function clearHistory() {
-    if (!confirm('确认删除 /tmp/clipboard/ 下所有文件？此操作不可恢复！')) return;
-    fetch('/del-all', {method:'DELETE'}).then(function(r) {
-        if (r.ok) {
-            saved = []; saveHistory(); result.innerHTML = '';
-            hint.textContent = '✅ 已清空 /tmp/clipboard/';
-            setTimeout(function() { hint.textContent = '点选上方区域后 Cmd+V，或直接从 Finder 拖文件入来'; }, 3000);
-        } else {
-            alert('删除失败');
-        }
+    showConfirm('确认清空 /tmp/clipboard/ 下所有文件？此操作不可恢复！', function() {
+        fetch('/del-all', {method:'DELETE'}).then(function(r) {
+            if (r.ok) {
+                saved = []; saveHistory(); result.innerHTML = '';
+                hint.textContent = '✅ 已清空 /tmp/clipboard/';
+                setTimeout(function() { hint.textContent = '点选上方区域后 Cmd+V，或直接从 Finder 拖文件入来'; }, 3000);
+            } else {
+                showConfirm('删除失败，请重试', null);
+            }
+        });
     });
+}
+
+function showConfirm(message, onYes) {
+    var ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center';
+    var box = document.createElement('div');
+    box.style.cssText = 'background:#22223a;border:1px solid #7c5ce7;border-radius:12px;padding:24px 32px;max-width:420px;text-align:center;color:#eee;font-size:15px;box-shadow:0 8px 32px rgba(0,0,0,.6)';
+    var msg = document.createElement('div');
+    msg.textContent = message;
+    msg.style.cssText = 'margin-bottom:20px;line-height:1.6';
+    var btns = document.createElement('div');
+    btns.style.cssText = 'display:flex;gap:12px;justify-content:center';
+    if (onYes) {
+        var yes = document.createElement('button');
+        yes.textContent = '确认';
+        yes.style.cssText = 'background:#c0392b;color:#fff;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600';
+        yes.onclick = function() { ov.remove(); onYes(); };
+        btns.appendChild(yes);
+    }
+    var no = document.createElement('button');
+    no.textContent = onYes ? '取消' : '关闭';
+    no.style.cssText = 'background:#444;color:#aaa;border:none;padding:10px 24px;border-radius:6px;cursor:pointer;font-size:14px';
+    no.onclick = function() { ov.remove(); };
+    btns.appendChild(no);
+    box.appendChild(msg);
+    box.appendChild(btns);
+    ov.appendChild(box);
+    ov.onclick = function(e) { if (e.target === ov) ov.remove(); };
+    document.body.appendChild(ov);
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -186,23 +216,7 @@ document.addEventListener('click', function(e) {
     else if (act === 'delFile') delFile(enc, el.parentElement.parentElement, e);
 });
 
-// Event delegation for data-act elements
-document.addEventListener("click", function(e) {
-    var el = e.target.closest("[data-act]");
-    if (!el) return;
-    var act = el.dataset.act;
-    var path = el.dataset.path || "";
-    var enc = el.dataset.enc || "";
-    if (act === "showImage") showImage(path);
-    else if (act === "doOcr") doOcr(enc, path);
-    else if (act === "showTextPreview") showTextPreview(enc, path);
-    else if (act === "copyPath") copyPath(el, path);
-    else if (act === "copyPathByEl") {
-        var pathEl = el.parentElement.parentElement.querySelector(".path");
-        copyPath(pathEl, path);
-    }
-    else if (act === "delFile") delFile(enc, el.parentElement.parentElement, e);
-});
+// (duplicate event delegation removed)
 
 function copyPath(el, path) {
     var orig = el.textContent, origColor = el.style.color;
@@ -401,14 +415,10 @@ zone.ondrop = function(e) {
 
 // ── auto-load from server ───────────────────────────────────────────────────────
 function loadFromServer() {
-    fetch('/list').then(function(r) { return r.json() }).then(function(files) {
-        var savedPaths = {};
-        saved.forEach(function(p) { savedPaths[p.path] = true });
-        files.forEach(function(f) {
-            if (!savedPaths[f.path]) {
-                saved.push({name: f.name, path: f.path});
-            }
-        });
+    // Cache-busting: add timestamp + cache:'no-store' to force fresh server read
+    fetch('/list?ts=' + Date.now(), {cache: 'no-store'}).then(function(r) { return r.json() }).then(function(files) {
+        // Use server state as source of truth: replace local saved[] entirely
+        saved = files.map(function(f) { return {name: f.name, path: f.path}; });
         saveHistory();
         renderHistory();
     });
