@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.broken
 *.working-backup
+*.v0.0.2-broken
+
