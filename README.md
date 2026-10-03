@@ -35,16 +35,13 @@ A simple self-hosted cloud clipboard that lets you paste text, screenshots, or f
 
 ### Linux / macOS
 
-```bash
-curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh -o install.sh
-bash ./install.sh
-```
-
-Piping into `bash` also works:
+One-liner (no local `.sh` file; stdin stays your terminal so prompts work):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh | bash
+bash <(curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh)
 ```
+
+Do **not** use `curl ... | bash` for this installer — the pipe steals stdin, so the first prompt exits immediately.
 
 ### Windows (PowerShell)
 

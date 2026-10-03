@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Agent Assistant Installer
-# Usage: curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh | bash
+# Recommended (keeps stdin as your terminal; no local .sh file):
+#   bash <(curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh)
+# Avoid: curl ... | bash  (stdin is the script stream, interactive prompts break)
 
 set -euo pipefail
 
