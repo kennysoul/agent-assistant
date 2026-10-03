@@ -329,7 +329,19 @@ configure_systemd() {
     log "Configured systemd autostart ($scope)"
 }
 
-# ── Alias Functions ───────────────────────────────────────────────────────────
+# ── Alias / manager script ────────────────────────────────────────────────────
+install_manager_script() {
+    mkdir -p "$INSTALL_DIR"
+    local src="${BASH_SOURCE[0]:-}"
+    if [[ -n "$src" && -f "$src" && -r "$src" ]]; then
+        cp "$src" "$INSTALL_DIR/install.sh"
+    else
+        run curl -sSL "$REPO_URL/raw/main/install.sh" -o "$INSTALL_DIR/install.sh"
+    fi
+    chmod +x "$INSTALL_DIR/install.sh"
+    log "Installed manager script: $INSTALL_DIR/install.sh"
+}
+
 setup_alias() {
     local shell_config=""
     case "${SHELL##*/}" in
@@ -337,18 +349,25 @@ setup_alias() {
         zsh) shell_config="$HOME/.zshrc" ;;
         *) log "Unsupported shell for alias setup: $SHELL" ; return ;;
     esac
-    
-    local alias_line="alias agent-assistant='$INSTALL_DIR/venv/bin/python $INSTALL_DIR/app/server.py'"
-    
-    if ! grep -qF "$alias_line" "$shell_config" 2>/dev/null; then
-        echo "" >> "$shell_config"
-        echo "# Agent Assistant CLI" >> "$shell_config"
-        echo "$alias_line" >> "$shell_config"
-        log "Added alias to $shell_config"
-        log "Run 'source $shell_config' or restart your terminal to use 'agent-assistant' command"
-    else
-        log "Alias already exists in $shell_config"
+
+    install_manager_script
+
+    local alias_line="alias agent-assistant='bash \"$INSTALL_DIR/install.sh\"'"
+
+    if [[ -f "$shell_config" ]]; then
+        # Replace any previous alias / marker block.
+        sed -i.bak '/# Agent Assistant CLI/,+1d' "$shell_config" 2>/dev/null || true
+        sed -i.bak '/alias agent-assistant=/d' "$shell_config" 2>/dev/null || true
     fi
+
+    {
+        echo ""
+        echo "# Agent Assistant CLI"
+        echo "$alias_line"
+    } >> "$shell_config"
+
+    log "Added alias to $shell_config (opens management menu)"
+    log "Run 'source $shell_config' or restart your terminal to use 'agent-assistant'"
 }
 
 # ── Listen / allowlist config ─────────────────────────────────────────────────
@@ -539,20 +558,29 @@ show_menu() {
     echo "  2. Toggle autostart"
     echo "  3. Configure network access"
     echo "  4. Upgrade Python"
-    echo "  5. Uninstall completely"
-    echo "  6. Exit"
+    echo "  5. Run server in foreground"
+    echo "  6. Repair shell alias (agent-assistant → this menu)"
+    echo "  7. Uninstall completely"
+    echo "  8. Exit"
     echo ""
     
-    read_input "Choose an option [1-6]: " choice
+    read_input "Choose an option [1-8]: " choice
     case "$choice" in
         1) update_app ;;
         2) toggle_autostart ;;
         3) configure_listen_addresses ;;
         4) upgrade_python ;;
-        5) uninstall ;;
-        6) exit 0 ;;
+        5) run_foreground ;;
+        6) setup_alias ;;
+        7) uninstall ;;
+        8) exit 0 ;;
         *) echo "Invalid option"; show_menu ;;
     esac
+}
+
+run_foreground() {
+    log "Starting server in foreground (Ctrl+C to stop)..."
+    exec "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/app/server.py"
 }
 
 check_autostart() {
@@ -586,6 +614,7 @@ update_app() {
     # For now, we'll just reinstall since we don't have git repo locally
     run clone_app
     run "$INSTALL_DIR/venv/bin/pip" install --upgrade rapidocr_onnxruntime Pillow
+    install_manager_script
     run restart_service
     log "Update complete!"
 }
@@ -755,8 +784,8 @@ main() {
             echo "  → http://${host}:$DEFAULT_PORT"
         done
     fi
-    echo "  → Run 'source ~/.bashrc' or '~/.zshrc' to use 'agent-assistant' command"
-    echo "  → For advanced management, re-run this installer"
+    echo "  → Run 'source ~/.zshrc' (or ~/.bashrc), then 'agent-assistant' for the management menu"
+    echo "  → Or: bash \"$INSTALL_DIR/install.sh\""
 }
 
 # Run main if script is executed directly

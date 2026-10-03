@@ -58,6 +58,7 @@ Install root: `~/opt/agent-assistant`
 | `python/` | Embedded standalone Python |
 | `venv/` | Virtualenv with `rapidocr_onnxruntime` + `Pillow` |
 | `app/server.py`, `app/index.html` | Application files |
+| `install.sh` | Management menu entrypoint (`agent-assistant`) |
 | `listen.conf` | Bind addresses, client allowlist, port |
 
 During a fresh install you will be asked:
@@ -66,26 +67,28 @@ During a fresh install you will be asked:
 2. **macOS only:** Start at boot without login? (`LaunchDaemon` + sudo) vs after user login (`LaunchAgent`)
 3. **Extra allowed IPs/CIDRs** (optional) and **listen bind addresses** (default `0.0.0.0`)
 
-It also adds a shell alias:
+It also installs a manager script and shell alias:
 
 ```bash
-alias agent-assistant='~/opt/agent-assistant/venv/bin/python ~/opt/agent-assistant/app/server.py'
+alias agent-assistant='bash "~/opt/agent-assistant/install.sh"'
 ```
 
-That alias **starts the HTTP server in the foreground**. It is not a management CLI.
+Running `agent-assistant` opens the **management menu** (update, autostart, network, etc.). It does **not** start the HTTP server in the foreground — the service is meant to run via autostart (or menu option “Run server in foreground”).
 
 After install, open `http://127.0.0.1:9191/`.
 
-### Re-run installer (management menu)
+### Re-run installer / `agent-assistant` menu
 
-If `~/opt/agent-assistant/python/bin/python` already exists, re-running `install.sh` opens a menu:
+If `~/opt/agent-assistant/python/bin/python` already exists, `agent-assistant` (or re-running `install.sh`) opens a menu:
 
 1. Update (pull latest `server.py` / `index.html` + upgrade packages)
 2. Toggle autostart
 3. Configure network access (`listen.conf`)
 4. Upgrade Python
-5. Uninstall completely
-6. Exit
+5. Run server in foreground
+6. Repair shell alias
+7. Uninstall completely
+8. Exit
 
 Dry-run (print planned actions only):
 
@@ -253,6 +256,7 @@ Installed layout (Unix installer):
 ├── app/
 │   ├── server.py
 │   └── index.html
+├── install.sh      # management entrypoint (`agent-assistant`)
 └── listen.conf     # bind / allow / port
 ```
 
