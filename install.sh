@@ -740,6 +740,7 @@ update_app() {
     clone_app
     elevate "$INSTALL_DIR/venv/bin/pip" install --upgrade rapidocr_onnxruntime Pillow
     install_manager_script remote
+    log "Restarting service to load new code..."
     restart_service
     log "Update complete!"
 }
@@ -793,6 +794,10 @@ restart_service() {
             local uid
             uid=$(id -u "${TARGET_USER:-$USER}" 2>/dev/null || id -u)
             if [[ -f /Library/LaunchDaemons/com.agent.assistant.plist ]]; then
+                # System LaunchDaemon — launchctl needs root; plist itself is not modified.
+                if [[ "$(id -u)" -ne 0 ]]; then
+                    log "Autostart is LaunchDaemon (boot); sudo needed to restart the service"
+                fi
                 if [[ "$(id -u)" -eq 0 ]]; then
                     run launchctl kickstart -k system/com.agent.assistant 2>/dev/null \
                         || { run launchctl stop com.agent.assistant 2>/dev/null || true
@@ -809,6 +814,9 @@ restart_service() {
             fi
             ;;
         linux)
+            if [[ "$(systemd_scope)" == "system" && "$(id -u)" -ne 0 ]]; then
+                log "Systemd system unit; sudo may be needed to restart"
+            fi
             run systemd_ctl restart agent-assistant.service 2>/dev/null || true
             ;;
     esac
