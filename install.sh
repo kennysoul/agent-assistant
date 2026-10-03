@@ -145,11 +145,12 @@ EOF
 
 configure_autostart() {
     local enable=${1:-true}
+    local boot_without_login=${2:-}
     [[ "$enable" != "true" ]] && return
     
     case "$PLATFORM" in
         darwin)
-            configure_launchd
+            configure_launchd "$boot_without_login"
             ;;
         linux)
             configure_systemd
@@ -157,11 +158,29 @@ configure_autostart() {
     esac
 }
 
-configure_launchd() {
-    local plist="$HOME/Library/LaunchAgents/com.agent.assistant.plist"
-    mkdir -p "$(dirname "$plist")"
-    
-    cat > "$plist" << EOF
+# Ask when not pre-answered (menu enable path).
+ask_launchd_boot_without_login() {
+    local answer
+    read -rp "Start at boot without login (LaunchDaemon, needs sudo)? [y/N]: " answer
+    answer=$(echo "${answer:-N}" | tr '[:upper:]' '[:lower:]')
+    [[ "$answer" =~ ^(y|yes)$ ]] && echo "true" || echo "false"
+}
+
+write_launchd_plist() {
+    local plist_path="$1"
+    local as_daemon="$2"
+    local user_keys=""
+
+    if [[ "$as_daemon" == "true" ]] && [[ "$(id -u)" -ne 0 ]]; then
+        user_keys="
+    <key>UserName</key>
+    <string>$(id -un)</string>
+    <key>GroupName</key>
+    <string>$(id -gn)</string>"
+    fi
+
+    local content
+    content=$(cat << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -178,14 +197,98 @@ configure_launchd() {
     <key>KeepAlive</key>
     <true/>
     <key>WorkingDirectory</key>
-    <string>$INSTALL_DIR/app</string>
+    <string>$INSTALL_DIR/app</string>${user_keys}
 </dict>
 </plist>
 EOF
-    
+)
+
+    if [[ "$as_daemon" == "true" ]]; then
+        if [[ "$(id -u)" -eq 0 ]]; then
+            printf '%s\n' "$content" > "$plist_path"
+            chown root:wheel "$plist_path"
+            chmod 644 "$plist_path"
+        else
+            printf '%s\n' "$content" | sudo tee "$plist_path" >/dev/null
+            sudo chown root:wheel "$plist_path"
+            sudo chmod 644 "$plist_path"
+        fi
+    else
+        mkdir -p "$(dirname "$plist_path")"
+        printf '%s\n' "$content" > "$plist_path"
+        chmod 644 "$plist_path"
+    fi
+}
+
+launchd_load_agent() {
+    local plist="$1"
+    if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
+        return 0
+    fi
     run launchctl unload "$plist" 2>/dev/null || true
     run launchctl load "$plist"
-    log "Configured launchd autostart"
+}
+
+launchd_load_daemon() {
+    local plist="$1"
+    if [[ "$(id -u)" -eq 0 ]]; then
+        if launchctl bootstrap system "$plist" 2>/dev/null; then
+            return 0
+        fi
+        run launchctl unload "$plist" 2>/dev/null || true
+        run launchctl load "$plist"
+    else
+        if sudo launchctl bootstrap system "$plist" 2>/dev/null; then
+            return 0
+        fi
+        run sudo launchctl unload "$plist" 2>/dev/null || true
+        run sudo launchctl load "$plist"
+    fi
+}
+
+launchd_unload_agent() {
+    local plist="$HOME/Library/LaunchAgents/com.agent.assistant.plist"
+    [[ -f "$plist" ]] || return 0
+    launchctl bootout "gui/$(id -u)/com.agent.assistant" 2>/dev/null || true
+    launchctl unload "$plist" 2>/dev/null || true
+    rm -f "$plist"
+}
+
+launchd_unload_daemon() {
+    local plist="/Library/LaunchDaemons/com.agent.assistant.plist"
+    [[ -f "$plist" ]] || return 0
+    if [[ "$(id -u)" -eq 0 ]]; then
+        launchctl bootout system/com.agent.assistant 2>/dev/null || true
+        launchctl unload "$plist" 2>/dev/null || true
+        rm -f "$plist"
+    else
+        sudo launchctl bootout system/com.agent.assistant 2>/dev/null || true
+        sudo launchctl unload "$plist" 2>/dev/null || true
+        sudo rm -f "$plist"
+    fi
+}
+
+configure_launchd() {
+    local boot_without_login=${1:-}
+    if [[ -z "$boot_without_login" ]]; then
+        boot_without_login="$(ask_launchd_boot_without_login)"
+    fi
+
+    # Only one domain at a time.
+    launchd_unload_agent
+    launchd_unload_daemon
+
+    if [[ "$boot_without_login" == "true" ]]; then
+        local plist="/Library/LaunchDaemons/com.agent.assistant.plist"
+        write_launchd_plist "$plist" "true"
+        launchd_load_daemon "$plist"
+        log "Configured LaunchDaemon autostart (boot without login)"
+    else
+        local plist="$HOME/Library/LaunchAgents/com.agent.assistant.plist"
+        write_launchd_plist "$plist" "false"
+        launchd_load_agent "$plist"
+        log "Configured LaunchAgent autostart (after user login)"
+    fi
 }
 
 configure_systemd() {
@@ -260,8 +363,12 @@ show_menu() {
 check_autostart() {
     case "$PLATFORM" in
         darwin)
-            if launchctl list | grep -q "com.agent.assistant"; then
-                echo "enabled"
+            if launchctl print "system/com.agent.assistant" &>/dev/null \
+                || [[ -f /Library/LaunchDaemons/com.agent.assistant.plist ]]; then
+                echo "enabled (boot)"
+            elif launchctl print "gui/$(id -u)/com.agent.assistant" &>/dev/null \
+                || [[ -f "$HOME/Library/LaunchAgents/com.agent.assistant.plist" ]]; then
+                echo "enabled (login)"
             else
                 echo "disabled"
             fi
@@ -290,7 +397,7 @@ update_app() {
 
 toggle_autostart() {
     local current=$(check_autostart)
-    if [[ "$current" == "enabled" ]]; then
+    if [[ "$current" != "disabled" ]]; then
         run disable_autostart
         log "Autostart disabled"
     else
@@ -306,9 +413,8 @@ enable_autostart() {
 disable_autostart() {
     case "$PLATFORM" in
         darwin)
-            local plist="$HOME/Library/LaunchAgents/com.agent.assistant.plist"
-            run launchctl unload "$plist" 2>/dev/null || true
-            rm -f "$plist"
+            launchd_unload_agent
+            launchd_unload_daemon
             ;;
         linux)
             # Clean both scopes in case a previous install left the other behind.
@@ -335,8 +441,21 @@ disable_autostart() {
 restart_service() {
     case "$PLATFORM" in
         darwin)
-            run launchctl stop com.agent.assistant 2>/dev/null || true
-            run launchctl start com.agent.assistant 2>/dev/null || true
+            if [[ -f /Library/LaunchDaemons/com.agent.assistant.plist ]]; then
+                if [[ "$(id -u)" -eq 0 ]]; then
+                    run launchctl kickstart -k system/com.agent.assistant 2>/dev/null \
+                        || { run launchctl stop com.agent.assistant 2>/dev/null || true
+                             run launchctl start com.agent.assistant 2>/dev/null || true; }
+                else
+                    run sudo launchctl kickstart -k system/com.agent.assistant 2>/dev/null \
+                        || { run sudo launchctl stop com.agent.assistant 2>/dev/null || true
+                             run sudo launchctl start com.agent.assistant 2>/dev/null || true; }
+                fi
+            else
+                run launchctl kickstart -k "gui/$(id -u)/com.agent.assistant" 2>/dev/null \
+                    || { run launchctl stop com.agent.assistant 2>/dev/null || true
+                         run launchctl start com.agent.assistant 2>/dev/null || true; }
+            fi
             ;;
         linux)
             run systemd_ctl restart agent-assistant.service 2>/dev/null || true
@@ -405,13 +524,18 @@ main() {
     # Convert to lowercase manually for compatibility
     enable_autostart_lower=$(echo "$enable_autostart" | tr '[:upper:]' '[:lower:]')
     [[ "$enable_autostart_lower" =~ ^(y|yes)$ ]] && enable_autostart=true || enable_autostart=false
+
+    local boot_without_login=""
+    if [[ "$enable_autostart" == "true" && "$PLATFORM" == "darwin" ]]; then
+        boot_without_login="$(ask_launchd_boot_without_login)"
+    fi
     
     # Execute installation steps
     download_python
     create_venv
     install_deps
     clone_app
-    configure_autostart "$enable_autostart"
+    configure_autostart "$enable_autostart" "$boot_without_login"
     setup_alias
     
     echo ""
