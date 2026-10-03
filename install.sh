@@ -157,7 +157,16 @@ systemd_ctl() {
         if [[ "$(id -u)" -eq 0 ]]; then
             systemctl "$@"
         else
-            sudo systemctl "$@"
+            # is-enabled / status / show are readable without sudo; avoid
+            # prompting for a password just to render the management menu.
+            case "${1:-}" in
+                is-enabled|is-active|status|show|cat|list-unit-files)
+                    systemctl "$@"
+                    ;;
+                *)
+                    sudo systemctl "$@"
+                    ;;
+            esac
         fi
     else
         systemctl --user "$@"
@@ -453,20 +462,31 @@ EOF
         sudo chmod +x "$wrapper"
     fi
 
-    # Always prefer a real binary on PATH over aliases (more reliable for root/zsh).
+    local dest=""
     if [[ "$(id -u)" -eq 0 ]]; then
         run mkdir -p /usr/local/bin
         run ln -sfn "$wrapper" /usr/local/bin/agent-assistant
-    else
+        dest="/usr/local/bin/agent-assistant"
+    elif [[ "$INSTALL_DIR" == /opt/* ]]; then
+        # Linux system install already needs sudo for /opt; put CLI on PATH.
         run sudo mkdir -p /usr/local/bin
         if run sudo ln -sfn "$wrapper" /usr/local/bin/agent-assistant; then
-            :
+            dest="/usr/local/bin/agent-assistant"
         else
             log "WARNING: could not create /usr/local/bin/agent-assistant (sudo failed)"
             return 1
         fi
+    else
+        # macOS per-user install: never force sudo just to refresh the CLI.
+        local bindir="${TARGET_HOME}/.local/bin"
+        mkdir -p "$bindir"
+        ln -sfn "$wrapper" "$bindir/agent-assistant"
+        dest="$bindir/agent-assistant"
+        if [[ ":$PATH:" != *":$bindir:"* ]]; then
+            log "NOTE: add $bindir to PATH (or rely on the shell alias)"
+        fi
     fi
-    log "Installed CLI: /usr/local/bin/agent-assistant → $wrapper"
+    log "Installed CLI: $dest → $wrapper"
 }
 
 setup_alias() {
@@ -519,7 +539,7 @@ setup_alias() {
     fi
 
     log "Added alias to $shell_config (backup; PATH command is preferred)"
-    if [[ -x /usr/local/bin/agent-assistant ]]; then
+    if command -v agent-assistant >/dev/null 2>&1 || [[ -x /usr/local/bin/agent-assistant ]] || [[ -x "${TARGET_HOME}/.local/bin/agent-assistant" ]]; then
         log "You can run: agent-assistant"
     else
         log "Run 'source $shell_config' or use: bash \"$INSTALL_DIR/install.sh\""
@@ -883,9 +903,10 @@ upgrade_python() {
 }
 
 uninstall() {
-    local confirm
+    local confirm confirm_lower
     read_input "Are you sure you want to uninstall? This will remove all data. [y/N]: " confirm
-    [[ "${confirm,,}" != "y" ]] && return
+    confirm_lower=$(echo "$confirm" | tr '[:upper:]' '[:lower:]')
+    [[ "$confirm_lower" != "y" ]] && return
     
     log "Uninstalling..."
     disable_autostart
@@ -896,6 +917,7 @@ uninstall() {
     else
         sudo rm -f /usr/local/bin/agent-assistant 2>/dev/null || true
     fi
+    rm -f "${TARGET_HOME:-$HOME}/.local/bin/agent-assistant" 2>/dev/null || true
     
     # Remove alias from the target user's shell configs
     resolve_identity
@@ -979,8 +1001,10 @@ main() {
         done
     fi
     echo "  → Install path: $INSTALL_DIR"
-    echo "  → Run 'source ~/.zshrc' (or ~/.bashrc), then 'agent-assistant' for the management menu"
-    echo "  → Or: bash \"$INSTALL_DIR/install.sh\""
+    echo "  → Run: agent-assistant   (or: bash \"$INSTALL_DIR/install.sh\")"
+    if [[ "$INSTALL_DIR" != /opt/* ]]; then
+        echo "  → If command not found, ensure ~/.local/bin is on PATH or source your shell rc"
+    fi
 }
 
 # Run main if script is executed directly

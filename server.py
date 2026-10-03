@@ -68,9 +68,17 @@ HTML = HTML.replace('__VERSION__', VERSION).replace('__HOSTNAME__', HOSTNAME)
 # ─── HTTP Handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def handle(self):
-        if _ALLOW_NETWORKS and not client_allowed(self.client_address[0]):
+        # Reject before parsing the request line when possible.
+        try:
+            peer = self.client_address[0]
+        except Exception:
+            peer = ''
+        if _ALLOW_NETWORKS and peer and not client_allowed(peer):
             self.close_connection = True
             try:
+                self.requestline = ''
+                self.request_version = 'HTTP/1.1'
+                self.command = None
                 self.send_error(403, 'Forbidden')
             except Exception:
                 pass
