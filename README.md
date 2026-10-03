@@ -1,3 +1,5 @@
+> **Migration note:** If you previously installed Agent Assistant by cloning this git repo and running `server.py` manually (or an older layout under `~/opt/agent-assistant` with files at the install root), **uninstall / stop that copy first, then reinstall with the one-line installer below**. Mixing the old layout with the new installer will not upgrade cleanly.
+
 # Agent Assistant — Cloud Clipboard with OCR
 
 A simple self-hosted cloud clipboard that lets you paste text, screenshots, or files into a webpage. Saved items are listed on the page with quick access to copy the path, preview text, or OCR images via [RapidOCR](https://github.com/RapidAI/RapidOCR). Files are stored locally on the server (default: `/tmp/clipboard/`) — nothing leaves your machine.
@@ -14,15 +16,16 @@ A simple self-hosted cloud clipboard that lets you paste text, screenshots, or f
 - **One-click delete** — deletes the file from disk and the entry from the UI immediately
 - **Clear directory** — modal confirmation, then `DELETE /del-all` wipes `/tmp/clipboard/`
 - **Live refresh** — every page load fetches the server's truth (`cache:'no-store'` + `Cache-Control: no-store, no-cache, must-revalidate` + timestamp query string)
+- **LAN-friendly defaults** — binds all interfaces, but only accepts localhost + private LAN clients unless you add more allow rules
 - **No build step** — pure Python HTTP server + a single `index.html`
 
 ---
 
 ## Requirements
 
-- Linux (Debian / Ubuntu tested)
-- Python 3.11 or newer
-- ~50 MB of disk for the OCR model (downloaded on first run by `rapidocr_onnxruntime`)
+- **Linux** (x86_64 / aarch64) or **macOS** (Intel / Apple Silicon), or **Windows** via `install.ps1`
+- The one-line installer downloads an embedded standalone Python (currently **3.14.x**) — system Python is not required for that path
+- ~50 MB of disk for the OCR model (downloaded on first use by `rapidocr_onnxruntime`)
 - 1 GB RAM is plenty
 - CPU-only — no GPU / OpenCL / CUDA required
 
@@ -30,116 +33,150 @@ A simple self-hosted cloud clipboard that lets you paste text, screenshots, or f
 
 ## Quick Installation (Recommended)
 
-### One-line Install (Cross-platform)
+### Linux / macOS
 
-Install Agent Assistant with a single command that automatically handles Python dependencies and system integration:
+```bash
+curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh -o install.sh
+bash ./install.sh
+```
 
-**Linux/macOS:**
+Piping into `bash` also works:
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+### Windows (PowerShell)
+
 ```powershell
 powershell -Command "iex (irm https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.ps1)"
 ```
 
-This installer will:
-- Automatically download and configure an embedded Python runtime
-- Install all dependencies (rapidocr_onnxruntime, Pillow)
-- Set up autostart on boot (systemd/launchd/Scheduled Task)
-- Add `agent-assistant` command to your shell
+### What the Unix installer does
 
-After installation, visit `http://localhost:9191` to use your cloud clipboard!
+Install root: `~/opt/agent-assistant`
+
+| Path | Purpose |
+|---|---|
+| `python/` | Embedded standalone Python |
+| `venv/` | Virtualenv with `rapidocr_onnxruntime` + `Pillow` |
+| `app/server.py`, `app/index.html` | Application files |
+| `listen.conf` | Bind addresses, client allowlist, port |
+
+During a fresh install you will be asked:
+
+1. **Enable autostart?**
+2. **macOS only:** Start at boot without login? (`LaunchDaemon` + sudo) vs after user login (`LaunchAgent`)
+3. **Extra allowed IPs/CIDRs** (optional) and **listen bind addresses** (default `0.0.0.0`)
+
+It also adds a shell alias:
+
+```bash
+alias agent-assistant='~/opt/agent-assistant/venv/bin/python ~/opt/agent-assistant/app/server.py'
+```
+
+That alias **starts the HTTP server in the foreground**. It is not a management CLI.
+
+After install, open `http://127.0.0.1:9191/`.
+
+### Re-run installer (management menu)
+
+If `~/opt/agent-assistant/python/bin/python` already exists, re-running `install.sh` opens a menu:
+
+1. Update (pull latest `server.py` / `index.html` + upgrade packages)
+2. Toggle autostart
+3. Configure network access (`listen.conf`)
+4. Upgrade Python
+5. Uninstall completely
+6. Exit
+
+Dry-run (print planned actions only):
+
+```bash
+bash ./install.sh --dry-run
+```
 
 ---
 
-## Deployment
+## Network defaults (important)
 
-### Option A — quick start (foreground)
+By default the server:
+
+- **Binds** `0.0.0.0:9191` (all interfaces), so LAN devices can reach the port
+- **Allows clients from**:
+  - `127.0.0.1/32` and `::1/128` (**always forced**; cannot be disabled)
+  - `10.0.0.0/8`
+  - `172.16.0.0/12`
+  - `192.168.0.0/16`
+- **Rejects** other clients with HTTP `403` (for example a VPS public IP hitting the port from the internet)
+
+So “listening on all interfaces” does **not** mean “open to the whole internet”.
+
+Example `~/opt/agent-assistant/listen.conf`:
+
+```ini
+# hosts: bind addresses (0.0.0.0 = all interfaces)
+# allow: client IP/CIDR allowlist (127.0.0.1 and ::1 are always forced by the server)
+hosts=0.0.0.0
+allow=127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+port=9191
+```
+
+To allow an extra public admin IP or a tighter LAN subnet, use the installer menu **Configure network access**, or edit `listen.conf` / set env vars, then restart the service.
+
+Environment overrides (optional):
+
+| Variable | Meaning |
+|---|---|
+| `AGENT_ASSISTANT_CONFIG` | Path to a config file (otherwise `../listen.conf` or `./listen.conf` next to `server.py`) |
+| `AGENT_ASSISTANT_HOSTS` | Comma-separated bind addresses |
+| `AGENT_ASSISTANT_ALLOW` | Comma-separated allow IPs/CIDRs |
+| `AGENT_ASSISTANT_PORT` | Listen port |
+
+---
+
+## Autostart behavior
+
+### Linux (`install.sh`)
+
+- Prefers **systemd user** units (`~/.config/systemd/user/agent-assistant.service`) when a user bus is available
+- If running as **root** or there is **no systemd user bus**, falls back to a **system** unit: `/etc/systemd/system/agent-assistant.service`
+
+### macOS (`install.sh`)
+
+- Default: **LaunchAgent** `~/Library/LaunchAgents/com.agent.assistant.plist` (starts after user login)
+- Optional: **LaunchDaemon** `/Library/LaunchDaemons/com.agent.assistant.plist` (starts at boot without GUI login; needs sudo; runs as your user via `UserName` / `GroupName`)
+
+### Windows (`install.ps1`)
+
+- Scheduled Task based autostart (see `install.ps1`)
+
+---
+
+## Manual / development run
+
+Useful for hacking on the repo without the installer:
 
 ```bash
-# 1. Clone the repo
 git clone https://github.com/kennysoul/agent-assistant.git
 cd agent-assistant
 
-# 2. Create a venv and install OCR deps
-uv venv /tmp/clipboardenv
-source /tmp/clipboardenv/bin/activate
-uv pip install rapidocr_onnxruntime Pillow
+python3 -m venv .venv
+source .venv/bin/activate
+pip install rapidocr_onnxruntime Pillow
 
-# 3. Run
 python server.py
 ```
 
-Open `http://localhost:9191/`. First OCR request downloads the ONNX models (~50 MB) and caches them under `~/.cache/rapidocr/` — subsequent calls are fast (~1 s per image on CPU).
+Without `listen.conf`, the same network defaults apply: bind `0.0.0.0:9191`, allow localhost + private LAN.
 
-### Option B — systemd service (recommended for always-on)
+First OCR use downloads ONNX models (~50 MB) under `~/.cache/rapidocr/`.
 
-```bash
-# 1. Place the code somewhere stable
-sudo mkdir -p /opt/agent-assistant
-sudo cp server.py index.html /opt/agent-assistant/
-sudo chown -R $USER:$USER /opt/agent-assistant
+---
 
-# 2. Create the venv
-uv venv /opt/agent-assistant/venv
-/opt/agent-assistant/venv/bin/pip install rapidocr_onnxruntime Pillow
+## Reverse proxy (HTTPS)
 
-# 3. Create the systemd unit
-sudo tee /etc/systemd/system/agent-assistant.service > /dev/null <<'UNIT'
-[Unit]
-Description=Agent Assistant — Cloud Clipboard + OCR
-After=network.target
-
-[Service]
-Type=simple
-User=YOUR_USER
-WorkingDirectory=/opt/agent-assistant
-ExecStart=/opt/agent-assistant/venv/bin/python server.py
-Restart=on-failure
-RestartSec=5
-Environment=OMP_NUM_THREADS=4
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-# 4. Enable + start
-sudo systemctl daemon-reload
-sudo systemctl enable --now agent-assistant.service
-sudo systemctl status agent-assistant.service
-```
-
-The server listens on `0.0.0.0:9191` by default. Open `http://<server-ip>:9191/`.
-
-Logs: `journalctl -u agent-assistant.service -f`
-
-### Option C — behind a reverse proxy (HTTPS)
-
-### Managing with the CLI Tool
-
-After installation, you can manage Agent Assistant using the `agent-assistant` command:
-
-```bash
-# Check status
-agent-assistant status
-
-# Start/stop/restart service
-agent-assistant start
-agent-assistant stop
-agent-assistant restart
-
-# Update to latest version
-agent-assistant update
-
-# Uninstall completely
-agent-assistant uninstall
-```
-
-If you expose port 9191 through Caddy / Nginx / Cloudflare Tunnel, just proxy the port. The page sends `Cache-Control: no-store` so the proxy won't cache it. If the proxy terminates TLS, the browser will allow `navigator.clipboard.writeText` — useful if you depend on the copy button.
-
-Example Caddy snippet:
+If you expose the service through Caddy / Nginx / Cloudflare Tunnel, proxy to loopback:
 
 ```caddy
 clip.example.com {
@@ -147,20 +184,27 @@ clip.example.com {
 }
 ```
 
+Notes:
+
+- The page sends `Cache-Control: no-store` so proxies should not cache the UI
+- TLS termination makes `navigator.clipboard.writeText` happier in browsers
+- The allowlist checks the **direct TCP peer**. If the proxy connects from localhost, peers appear as `127.0.0.1` (allowed). If something connects from a non-private address straight to port 9191, it is rejected unless you add that address/CIDR to `allow`
+
 ---
 
-## Configuration
-
-The top of `server.py` has a few constants you may want to tweak:
+## Configuration in `server.py`
 
 | Constant | Default | Purpose |
 |---|---|---|
-| `VERSION` | `'0.0.9'` | Displayed in the page footer; bump on every code change |
-| `SAVE_DIR` | `'/tmp/clipboard'` | Where uploaded files live. Change to e.g. `/var/lib/agent-assistant` for persistence across reboots |
-| `MAX_PIXELS` | `1200` | Largest dimension the OCR engine sees — large images get resized down for speed |
-| `TEXT_PREVIEW_CHARS` | `200` | First N characters shown for a text snippet |
+| `VERSION` | `'0.0.9'` | Shown in the page footer; bump when shipping UI/server changes |
+| `SAVE_DIR` | `'/tmp/clipboard'` | Upload storage (not persistent across reboot unless you change it) |
+| `MAX_PIXELS` | `1200` | OCR resize cap (longest side) |
+| `TEXT_PREVIEW_CHARS` | `200` | Preview length for text snippets |
+| `DEFAULT_PORT` | `9191` | Port when config/env does not override |
+| `DEFAULT_BIND_HOSTS` | `['0.0.0.0']` | Bind when config/env does not override |
+| `DEFAULT_ALLOW` | localhost + RFC1918 | Client allowlist when config/env does not override |
 
-The HTTP port is hardcoded at the bottom of `server.py` (`HTTPServer(('0.0.0.0', 9191), Handler)`). Change it if 9191 is taken.
+Prefer `listen.conf` / env for network settings so installer updates do not wipe your edits inside `server.py`.
 
 ---
 
@@ -173,16 +217,20 @@ The HTTP port is hardcoded at the bottom of `server.py` (`HTTPServer(('0.0.0.0',
 | `POST` | `/up` | multipart upload: `f=<file>` for files, `text=<utf8>` for clipboard text |
 | `GET` | `/ocr?path=<urlencoded>` | OCR an image, returns `{success, text}` |
 | `GET` | `/preview?path=<urlencoded>` | First `TEXT_PREVIEW_CHARS` characters of a text file |
+| `GET` | `/text?path=<urlencoded>` | Full text body |
 | `GET` | `/tmp/clipboard/<filename>` | Serve any saved file (images, etc.) |
 | `DELETE` | `/del?path=<urlencoded>` | Delete a single file (must live under `SAVE_DIR`) |
 | `DELETE` | `/del-all` | Delete every file in `SAVE_DIR` |
 
 All responses set:
+
 ```
 Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 Pragma: no-cache
 Expires: 0
 ```
+
+Unauthorized clients (outside the allowlist) receive `403 Forbidden`.
 
 ---
 
@@ -190,31 +238,46 @@ Expires: 0
 
 ```
 agent-assistant/
-├── server.py          # Pure-Python HTTP handler (~10 KB)
-├── index.html         # UI: HTML + CSS + JS (~20 KB)
-├── install.sh         # Unix one-line installer
-├── install.ps1        # Windows PowerShell installer
-├── agent-cli.py       # Management CLI tool
-├── README.md          # this file
-└── .gitignore         # Python bytecode, backup files
+├── server.py       # HTTP server + OCR + listen/allowlist logic
+├── index.html      # UI
+├── install.sh      # Linux/macOS installer + management menu
+├── install.ps1     # Windows installer
+├── agent-cli.py    # Optional helper CLI in the repo (not what install.sh aliases)
+├── README.md
+└── .gitignore
 ```
 
-No build pipeline, no `node_modules`, no framework.
+Installed layout (Unix installer):
+
+```
+~/opt/agent-assistant/
+├── python/         # embedded Python
+├── venv/           # dependencies
+├── app/
+│   ├── server.py
+│   └── index.html
+└── listen.conf     # bind / allow / port
+```
 
 ---
 
 ## Troubleshooting
 
-- **OCR is slow (~2 s)** — first call downloads the ONNX model; later calls hit the warm model cache. Bigger images are auto-resized to 1200 px before OCR. To go faster, install `libopenblas` or `intel-openmp` system packages for SIMD acceleration.
-- **Copy button says "❌ 复制失败"** — `navigator.clipboard.writeText` requires a secure context (HTTPS or `localhost`). The fallback uses `document.execCommand('copy')` with a hidden textarea — works in most browsers even over plain HTTP.
-- **`/tmp/clipboard/` fills up** — files are kept until you click the 🗑 button or use "清空目录" in the footer. Add a cron job to clean old files if you need automatic expiry.
-- **Service won't start on port 9191** — another process is bound. `sudo ss -tlnp | grep 9191` and kill it, or change the port in `server.py`.
+- **Previously installed from git and things look wrong** — stop the old process, remove the old files/service, then use `install.sh` / `install.ps1` for a clean install (see the migration note at the top).
+- **Can open on the machine but not from another LAN device** — confirm bind is `0.0.0.0`, the client is in a private range, and no host firewall is blocking `9191`.
+- **VPS public access returns 403** — expected with default allowlist. Add your client IP/CIDR via **Configure network access** or `allow=` in `listen.conf`, then restart.
+- **OCR is slow on first call** — model download + warm-up; later calls are much faster. Images larger than 1200 px are resized before OCR.
+- **Copy button says "❌ 复制失败"** — `navigator.clipboard.writeText` needs a secure context (HTTPS or `localhost`). Fallback `execCommand('copy')` still works in many HTTP cases.
+- **`/tmp/clipboard/` fills up** — files stay until deleted in the UI. Use a cron job if you need automatic expiry.
+- **Port 9191 already in use** — find the process (`lsof -nP -iTCP:9191 -sTCP:LISTEN` / `ss -tlnp | grep 9191`), stop it, or change `port=` in `listen.conf`.
+- **Linux autostart failed with D-Bus / user bus errors** — current installer falls back to a system unit when root or when no user bus is available; re-run the installer / toggle autostart after updating `install.sh`.
+- **macOS needs service before GUI login (SSH-only box)** — choose LaunchDaemon (“boot without login”) during install or when enabling autostart.
 
 ---
 
 ## Versioning
 
-The `VERSION` constant at the top of `server.py` is rendered in the page footer. Bump it on every change so users can confirm they're on the latest copy. Convention used here: `0.0.N` increments per change.
+`VERSION` in `server.py` is rendered in the page footer. Bump it when you ship changes users should notice. Convention: `0.0.N`.
 
 ---
 
