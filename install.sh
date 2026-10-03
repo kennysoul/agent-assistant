@@ -410,7 +410,7 @@ configure_systemd() {
     log "Configured systemd autostart ($scope)"
 }
 
-# ── Alias / manager script ────────────────────────────────────────────────────
+# ── Alias / manager script / PATH command ─────────────────────────────────────
 install_manager_script() {
     # pass "remote" to always refresh from GitHub (used by Update)
     local mode=${1:-local}
@@ -435,8 +435,45 @@ install_manager_script() {
     log "Installed manager script: $dest"
 }
 
+# Real PATH entry so `agent-assistant` works without relying on shell aliases.
+install_cli_command() {
+    elevate mkdir -p "$INSTALL_DIR/bin"
+    local wrapper="$INSTALL_DIR/bin/agent-assistant"
+    local body
+    body=$(cat << EOF
+#!/usr/bin/env bash
+exec bash "$INSTALL_DIR/install.sh" "\$@"
+EOF
+)
+    if [[ "$(id -u)" -eq 0 ]] || [[ "$INSTALL_DIR" != /opt/* ]]; then
+        printf '%s\n' "$body" > "$wrapper"
+        chmod +x "$wrapper"
+    else
+        printf '%s\n' "$body" | sudo tee "$wrapper" >/dev/null
+        sudo chmod +x "$wrapper"
+    fi
+
+    # Always prefer a real binary on PATH over aliases (more reliable for root/zsh).
+    if [[ "$(id -u)" -eq 0 ]]; then
+        run mkdir -p /usr/local/bin
+        run ln -sfn "$wrapper" /usr/local/bin/agent-assistant
+    else
+        run sudo mkdir -p /usr/local/bin
+        if run sudo ln -sfn "$wrapper" /usr/local/bin/agent-assistant; then
+            :
+        else
+            log "WARNING: could not create /usr/local/bin/agent-assistant (sudo failed)"
+            return 1
+        fi
+    fi
+    log "Installed CLI: /usr/local/bin/agent-assistant → $wrapper"
+}
+
 setup_alias() {
     resolve_identity
+    install_manager_script
+    install_cli_command || true
+
     local shell_config=""
     if [[ -f "$TARGET_HOME/.zshrc" ]]; then
         shell_config="$TARGET_HOME/.zshrc"
@@ -448,8 +485,6 @@ setup_alias() {
             *) shell_config="$TARGET_HOME/.zshrc" ;;
         esac
     fi
-
-    install_manager_script
 
     local alias_line="alias agent-assistant='bash \"$INSTALL_DIR/install.sh\"'"
 
@@ -483,8 +518,12 @@ setup_alias() {
         } >> "$shell_config"
     fi
 
-    log "Added alias to $shell_config (opens management menu)"
-    log "Run 'source $shell_config' or restart your terminal to use 'agent-assistant'"
+    log "Added alias to $shell_config (backup; PATH command is preferred)"
+    if [[ -x /usr/local/bin/agent-assistant ]]; then
+        log "You can run: agent-assistant"
+    else
+        log "Run 'source $shell_config' or use: bash \"$INSTALL_DIR/install.sh\""
+    fi
 }
 
 # ── Listen / allowlist config ─────────────────────────────────────────────────
@@ -682,7 +721,7 @@ show_menu() {
     echo "  3. Configure network access"
     echo "  4. Upgrade Python"
     echo "  5. Run server in foreground"
-    echo "  6. Repair shell alias (agent-assistant → this menu)"
+    echo "  6. Repair CLI command (agent-assistant on PATH)"
     echo "  7. Uninstall completely"
     echo "  8. Exit"
     echo ""
@@ -740,6 +779,7 @@ update_app() {
     clone_app
     elevate "$INSTALL_DIR/venv/bin/pip" install --upgrade rapidocr_onnxruntime Pillow
     install_manager_script remote
+    setup_alias
     log "Restarting service to load new code..."
     restart_service
     log "Update complete!"
@@ -851,6 +891,11 @@ uninstall() {
     disable_autostart
     elevate rm -rf "$INSTALL_DIR"
     elevate rm -rf /tmp/clipboard
+    if [[ "$(id -u)" -eq 0 ]]; then
+        rm -f /usr/local/bin/agent-assistant
+    else
+        sudo rm -f /usr/local/bin/agent-assistant 2>/dev/null || true
+    fi
     
     # Remove alias from the target user's shell configs
     resolve_identity

@@ -72,16 +72,17 @@ During a fresh install you will be asked:
 2. **macOS only:** Start at boot without login? (`LaunchDaemon` + sudo) vs after user login (`LaunchAgent`)
 3. **Extra allowed IPs/CIDRs** (optional) and **listen bind addresses** (default `0.0.0.0`)
 
-It also installs a manager script and shell alias:
+It also installs a PATH command and a shell alias backup:
 
 ```bash
-# macOS
-alias agent-assistant='bash "$HOME/opt/agent-assistant/install.sh"'
-# Linux
-alias agent-assistant='bash "/opt/agent-assistant/install.sh"'
+# Primary (works without sourcing rc files):
+/usr/local/bin/agent-assistant → <install-root>/bin/agent-assistant
+
+# Backup alias in ~/.zshrc or ~/.bashrc:
+alias agent-assistant='bash "<install-root>/install.sh"'
 ```
 
-Running `agent-assistant` opens the **management menu** (update, autostart, network, etc.). It does **not** start the HTTP server in the foreground — the service is meant to run via autostart (or menu option “Run server in foreground”).
+Running `agent-assistant` opens the **management menu**.
 
 After install, open `http://127.0.0.1:9191/`.
 
@@ -94,7 +95,7 @@ If the install’s `python/bin/python` already exists, `agent-assistant` (or re-
 3. Configure network access (`listen.conf`)
 4. Upgrade Python
 5. Run server in foreground
-6. Repair shell alias
+6. Repair CLI command (`/usr/local/bin/agent-assistant`)
 7. Uninstall completely
 8. Exit
 
