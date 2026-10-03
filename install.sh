@@ -24,6 +24,22 @@ DEFAULT_PORT=9191
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 err() { echo "ERROR: $*" >&2; exit 1; }
 
+# Interactive prompts must use the real terminal when the script is piped
+# (curl ... | bash), because stdin is the script stream, not the keyboard.
+read_input() {
+    local prompt=$1
+    local __var=$2
+    local reply=""
+    if [[ -t 0 ]]; then
+        read -rp "$prompt" reply
+    elif [[ -r /dev/tty ]]; then
+        read -rp "$prompt" reply </dev/tty
+    else
+        err "No interactive terminal available for prompts. Run: bash install.sh"
+    fi
+    printf -v "$__var" '%s' "$reply"
+}
+
 # Dry-run wrapper for commands
 run() {
     if [[ "$DRY_RUN" == "true" ]]; then
@@ -161,7 +177,7 @@ configure_autostart() {
 # Ask when not pre-answered (menu enable path).
 ask_launchd_boot_without_login() {
     local answer
-    read -rp "Start at boot without login (LaunchDaemon, needs sudo)? [y/N]: " answer
+    read_input "Start at boot without login (LaunchDaemon, needs sudo)? [y/N]: " answer
     answer=$(echo "${answer:-N}" | tr '[:upper:]' '[:lower:]')
     [[ "$answer" =~ ^(y|yes)$ ]] && echo "true" || echo "false"
 }
@@ -442,10 +458,10 @@ normalize_allow() {
 
 ask_listen_config() {
     local extra_allow bind_hosts
-    echo "Default access: localhost + private LAN (10/8, 172.16/12, 192.168/16)"
-    echo "Default listen: all interfaces (0.0.0.0)"
-    read -rp "Extra allowed IPs/CIDRs (optional, e.g. 203.0.113.10 or 192.168.111.0/24): " extra_allow
-    read -rp "Listen bind addresses [${DEFAULT_BIND_HOSTS}]: " bind_hosts
+    echo "Default access: localhost + private LAN (10/8, 172.16/12, 192.168/16)" >&2
+    echo "Default listen: all interfaces (0.0.0.0)" >&2
+    read_input "Extra allowed IPs/CIDRs (optional, e.g. 203.0.113.10 or 192.168.111.0/24): " extra_allow
+    read_input "Listen bind addresses [${DEFAULT_BIND_HOSTS}]: " bind_hosts
     bind_hosts=$(normalize_bind_hosts "${bind_hosts:-$DEFAULT_BIND_HOSTS}")
     local allow
     allow=$(normalize_allow "$extra_allow")
@@ -525,7 +541,7 @@ show_menu() {
     echo "  6. Exit"
     echo ""
     
-    read -rp "Choose an option [1-6]: " choice
+    read_input "Choose an option [1-6]: " choice
     case "$choice" in
         1) update_app ;;
         2) toggle_autostart ;;
@@ -661,7 +677,8 @@ upgrade_python() {
 }
 
 uninstall() {
-    read -rp "Are you sure you want to uninstall? This will remove all data. [y/N]: " confirm
+    local confirm
+    read_input "Are you sure you want to uninstall? This will remove all data. [y/N]: " confirm
     [[ "${confirm,,}" != "y" ]] && return
     
     log "Uninstalling..."
@@ -696,7 +713,7 @@ main() {
     echo "Python:     $PYTHON_VERSION (standalone)"
     echo ""
     
-    read -rp "Enable autostart? [Y/n]: " enable_autostart
+    read_input "Enable autostart? [Y/n]: " enable_autostart
     enable_autostart=${enable_autostart:-Y}
     # Convert to lowercase manually for compatibility
     enable_autostart_lower=$(echo "$enable_autostart" | tr '[:upper:]' '[:lower:]')
