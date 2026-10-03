@@ -331,15 +331,27 @@ configure_systemd() {
 
 # ── Alias / manager script ────────────────────────────────────────────────────
 install_manager_script() {
+    # pass "remote" to always refresh from GitHub (used by Update)
+    local mode=${1:-local}
     mkdir -p "$INSTALL_DIR"
+    local dest="$INSTALL_DIR/install.sh"
     local src="${BASH_SOURCE[0]:-}"
-    if [[ -n "$src" && -f "$src" && -r "$src" ]]; then
-        cp "$src" "$INSTALL_DIR/install.sh"
+
+    if [[ "$mode" == "remote" ]]; then
+        run curl -sSL "$REPO_URL/raw/main/install.sh" -o "$dest"
+    elif [[ -n "$src" && -f "$src" && -r "$src" ]]; then
+        if [[ "$src" -ef "$dest" ]]; then
+            log "Manager script already in place: $dest"
+            chmod +x "$dest"
+            return
+        fi
+        cp "$src" "$dest"
     else
-        run curl -sSL "$REPO_URL/raw/main/install.sh" -o "$INSTALL_DIR/install.sh"
+        run curl -sSL "$REPO_URL/raw/main/install.sh" -o "$dest"
     fi
-    chmod +x "$INSTALL_DIR/install.sh"
-    log "Installed manager script: $INSTALL_DIR/install.sh"
+
+    chmod +x "$dest"
+    log "Installed manager script: $dest"
 }
 
 setup_alias() {
@@ -614,7 +626,7 @@ update_app() {
     # For now, we'll just reinstall since we don't have git repo locally
     run clone_app
     run "$INSTALL_DIR/venv/bin/pip" install --upgrade rapidocr_onnxruntime Pillow
-    install_manager_script
+    install_manager_script remote
     run restart_service
     log "Update complete!"
 }
