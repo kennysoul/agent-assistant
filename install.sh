@@ -16,13 +16,13 @@ for arg in "$@"; do
 done
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-# System-wide install path for every user (requires root/sudo to write).
-INSTALL_DIR="/opt/agent-assistant"
+# Set by resolve_install_dir(): macOS → ~/opt/... ; Linux → /opt/...
+INSTALL_DIR=""
+LISTEN_CONF=""
 PYTHON_RELEASE="20261001"
 PYTHON_VERSION="3.14.8"
 REPO_URL="https://github.com/kennysoul/agent-assistant"
 DEFAULT_PORT=9191
-LISTEN_CONF="$INSTALL_DIR/listen.conf"
 TARGET_USER=""
 TARGET_HOME=""
 
@@ -56,12 +56,14 @@ run() {
     fi
 }
 
-# Write under /opt as root when needed.
+# Elevate only when writing under system /opt (Linux). macOS ~/opt needs no sudo.
 elevate() {
     if [[ "$(id -u)" -eq 0 ]]; then
         run "$@"
-    else
+    elif [[ "$INSTALL_DIR" == /opt/* ]]; then
         run sudo "$@"
+    else
+        run "$@"
     fi
 }
 
@@ -77,6 +79,18 @@ resolve_identity() {
     if [[ ! -d "$TARGET_HOME" ]]; then
         TARGET_HOME="${HOME:-/root}"
     fi
+}
+
+resolve_install_dir() {
+    case "$PLATFORM" in
+        darwin)
+            INSTALL_DIR="${TARGET_HOME}/opt/agent-assistant"
+            ;;
+        *)
+            INSTALL_DIR="/opt/agent-assistant"
+            ;;
+    esac
+    LISTEN_CONF="$INSTALL_DIR/listen.conf"
 }
 
 # ── Platform Detection ────────────────────────────────────────────────────────
@@ -605,7 +619,7 @@ allow=${allow}
 port=${DEFAULT_PORT}
 EOF
 )
-    if [[ "$(id -u)" -eq 0 ]]; then
+    if [[ "$(id -u)" -eq 0 ]] || [[ "$INSTALL_DIR" != /opt/* ]]; then
         printf '%s\n' "$content" > "$LISTEN_CONF"
     else
         printf '%s\n' "$content" | sudo tee "$LISTEN_CONF" >/dev/null
@@ -851,6 +865,7 @@ uninstall() {
 main() {
     detect_platform
     resolve_identity
+    resolve_install_dir
     
     # Check if already installed
     if [[ -x "$INSTALL_DIR/python/bin/python" ]]; then
@@ -866,7 +881,7 @@ main() {
     echo "Install to: $INSTALL_DIR"
     echo ""
     
-    if [[ "$(id -u)" -ne 0 ]]; then
+    if [[ "$INSTALL_DIR" == /opt/* && "$(id -u)" -ne 0 ]]; then
         log "Writing to $INSTALL_DIR requires sudo privileges"
     fi
 
