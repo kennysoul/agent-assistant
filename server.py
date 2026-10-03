@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Agent Assistant — Clipboard Tool with OCR + Text Preview"""
-import os, time, re, json, mimetypes
+import os, time, re, json, mimetypes, threading, ipaddress
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 SAVE_DIR = '/tmp/clipboard'
@@ -9,6 +9,18 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 VERSION = '0.0.9'
 
 _ocr_engine = None
+_ALLOW_NETWORKS = []
+
+# Bind all interfaces by default so LAN can reach the service.
+# Access is restricted by allowlist (localhost + private LAN).
+DEFAULT_PORT = 9191
+DEFAULT_BIND_HOSTS = ['0.0.0.0']
+REQUIRED_ALLOW = ['127.0.0.1/32', '::1/128']
+DEFAULT_ALLOW = REQUIRED_ALLOW + [
+    '10.0.0.0/8',
+    '172.16.0.0/12',
+    '192.168.0.0/16',
+]
 
 def get_ocr():
     global _ocr_engine
@@ -54,6 +66,16 @@ HTML = HTML.replace('__VERSION__', VERSION)
 
 # ─── HTTP Handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
+    def handle(self):
+        if _ALLOW_NETWORKS and not client_allowed(self.client_address[0]):
+            self.close_connection = True
+            try:
+                self.send_error(403, 'Forbidden')
+            except Exception:
+                pass
+            return
+        super().handle()
+
     def do_GET(self):
         if self.path == '/':
             self._r(200, 'text/html', HTML.encode())
@@ -253,16 +275,130 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args): pass
 
+# ─── Listen / allowlist config ───────────────────────────────────────────────
+def _parse_list(value):
+    items = []
+    for part in (value or '').split(','):
+        item = part.strip()
+        if item and item not in items:
+            items.append(item)
+    return items
+
+def _parse_networks(values):
+    nets = []
+    seen = set()
+    for item in values:
+        text = item if '/' in item else (item + ('/128' if ':' in item else '/32'))
+        net = ipaddress.ip_network(text, strict=False)
+        key = str(net)
+        if key not in seen:
+            seen.add(key)
+            nets.append(net)
+    return nets
+
+def _normalize_client_ip(ip_str):
+    ip = ipaddress.ip_address(ip_str)
+    if ip.version == 6 and getattr(ip, 'ipv4_mapped', None) is not None:
+        return ip.ipv4_mapped
+    return ip
+
+def client_allowed(ip_str):
+    try:
+        ip = _normalize_client_ip(ip_str)
+    except ValueError:
+        return False
+    return any(ip in net for net in _ALLOW_NETWORKS)
+
+def _config_paths():
+    paths = []
+    env_path = os.environ.get('AGENT_ASSISTANT_CONFIG')
+    if env_path:
+        paths.append(env_path)
+    here = os.path.dirname(os.path.abspath(__file__))
+    paths.append(os.path.join(here, '..', 'listen.conf'))
+    paths.append(os.path.join(here, 'listen.conf'))
+    return paths
+
+def normalize_bind_hosts(hosts):
+    hosts = _parse_list(','.join(hosts) if isinstance(hosts, list) else (hosts or ''))
+    if not hosts or '0.0.0.0' in hosts:
+        return list(DEFAULT_BIND_HOSTS)
+    hosts = [h for h in hosts if h != '127.0.0.1']
+    hosts.insert(0, '127.0.0.1')
+    return hosts
+
+def normalize_allow(values):
+    items = _parse_list(','.join(values) if isinstance(values, list) else (values or ''))
+    # Localhost can never be disabled.
+    for required in reversed(REQUIRED_ALLOW):
+        base = required.split('/')[0]
+        if not any(x == required or x == base for x in items):
+            items.insert(0, required)
+    return _parse_networks(items)
+
+def load_listen_config():
+    """Load bind hosts, allowlist, and port.
+
+    Default: bind 0.0.0.0, allow localhost + private LAN (10/8, 172.16/12, 192.168/16).
+    127.0.0.1 / ::1 can never be removed from the allowlist.
+    """
+    port = DEFAULT_PORT
+    hosts = list(DEFAULT_BIND_HOSTS)
+    allow = list(DEFAULT_ALLOW)
+
+    for path in _config_paths():
+        if not path or not os.path.isfile(path):
+            continue
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key, value = key.strip().lower(), value.strip()
+                if key == 'hosts':
+                    hosts = _parse_list(value) or list(DEFAULT_BIND_HOSTS)
+                elif key in ('allow', 'allowed', 'allowlist'):
+                    allow = _parse_list(value) or list(DEFAULT_ALLOW)
+                elif key == 'port':
+                    port = int(value)
+        break
+
+    env_hosts = os.environ.get('AGENT_ASSISTANT_HOSTS')
+    if env_hosts:
+        hosts = _parse_list(env_hosts)
+    env_allow = os.environ.get('AGENT_ASSISTANT_ALLOW')
+    if env_allow:
+        allow = _parse_list(env_allow)
+    env_port = os.environ.get('AGENT_ASSISTANT_PORT')
+    if env_port:
+        port = int(env_port)
+
+    return normalize_bind_hosts(hosts), normalize_allow(allow), port
+
+def start_servers(hosts, port):
+    servers = []
+    for host in hosts:
+        servers.append(HTTPServer((host, port), Handler))
+
+    for host in hosts:
+        print(f'🚀 Listening on http://{host}:{port}')
+
+    for server in servers[:-1]:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    servers[-1].serve_forever()
+
 # ─── Main ───────────────────────────────────────────────────────────────────
 os.environ.setdefault('OMP_NUM_THREADS', '8')
 os.environ.setdefault('MKL_NUM_THREADS', '8')
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '8')
 
-print('📋 Agent Assistant Clipboard on :9191')
+hosts, allow_networks, port = load_listen_config()
+_ALLOW_NETWORKS = allow_networks
+print(f'📋 Agent Assistant Clipboard on :{port}')
+print('🔐 Allow: ' + ', '.join(str(n) for n in _ALLOW_NETWORKS))
 print('🔍 Loading OCR models...')
 _prewarm_ocr()
 print('🔍 OCR ready. Max resize: %dpx | Text preview: %d chars' % (MAX_PIXELS, TEXT_PREVIEW_CHARS))
-print('🚀 Server running on http://localhost:9191')
 HTML = HTML.replace('__VERSION__', VERSION)
-server = HTTPServer(('0.0.0.0', 9191), Handler)
-server.serve_forever()
+start_servers(hosts, port)

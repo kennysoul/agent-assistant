@@ -333,6 +333,179 @@ setup_alias() {
     fi
 }
 
+# ── Listen / allowlist config ─────────────────────────────────────────────────
+# Default: bind 0.0.0.0; allow localhost + private LAN.
+# 127.0.0.1 / ::1 can never be removed from the allowlist.
+LISTEN_CONF="$INSTALL_DIR/listen.conf"
+DEFAULT_BIND_HOSTS="0.0.0.0"
+DEFAULT_ALLOW="127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+_valid_ip_or_cidr() {
+    local value=$1
+    if [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]]; then
+        return 0
+    fi
+    if [[ "$value" =~ ^::1(/128)?$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+normalize_bind_hosts() {
+    local raw=${1:-$DEFAULT_BIND_HOSTS}
+    local -a result=()
+    local part host h
+
+    if [[ -z "$raw" ]]; then
+        echo "$DEFAULT_BIND_HOSTS"
+        return
+    fi
+
+    local -a parts=()
+    IFS=',' read -ra parts <<< "$raw"
+    for part in "${parts[@]}"; do
+        host=$(echo "$part" | tr -d '[:space:]')
+        [[ -z "$host" ]] && continue
+        if [[ "$host" != "0.0.0.0" && ! "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            err "Invalid bind address: $host"
+        fi
+        local exists=false
+        for h in "${result[@]+"${result[@]}"}"; do
+            [[ "$h" == "$host" ]] && exists=true && break
+        done
+        [[ "$exists" == "true" ]] || result+=("$host")
+    done
+
+    if [[ ${#result[@]} -eq 0 ]]; then
+        echo "$DEFAULT_BIND_HOSTS"
+        return
+    fi
+
+    local has_all=false
+    for h in "${result[@]}"; do
+        [[ "$h" == "0.0.0.0" ]] && has_all=true && break
+    done
+    if [[ "$has_all" == "true" ]]; then
+        echo "$DEFAULT_BIND_HOSTS"
+        return
+    fi
+
+    local has_local=false
+    for h in "${result[@]}"; do
+        [[ "$h" == "127.0.0.1" ]] && has_local=true && break
+    done
+    [[ "$has_local" == "true" ]] || result=("127.0.0.1" "${result[@]}")
+
+    local IFS=','
+    echo "${result[*]}"
+}
+
+normalize_allow() {
+    local raw=${1:-}
+    local -a result=()
+    local part item h
+
+    # Start from defaults, then append extras.
+    IFS=',' read -ra result <<< "$DEFAULT_ALLOW"
+
+    if [[ -n "$raw" ]]; then
+        local -a parts=()
+        IFS=',' read -ra parts <<< "$raw"
+        for part in "${parts[@]}"; do
+            item=$(echo "$part" | tr -d '[:space:]')
+            [[ -z "$item" ]] && continue
+            if ! _valid_ip_or_cidr "$item"; then
+                err "Invalid allow IP/CIDR: $item"
+            fi
+            local exists=false
+            for h in "${result[@]+"${result[@]}"}"; do
+                [[ "$h" == "$item" ]] && exists=true && break
+            done
+            [[ "$exists" == "true" ]] || result+=("$item")
+        done
+    fi
+
+    # Force localhost entries first.
+    local -a forced=("127.0.0.1/32" "::1/128")
+    local -a final=()
+    for item in "${forced[@]}" "${result[@]+"${result[@]}"}"; do
+        local exists=false
+        for h in "${final[@]+"${final[@]}"}"; do
+            [[ "$h" == "$item" ]] && exists=true && break
+        done
+        [[ "$exists" == "true" ]] || final+=("$item")
+    done
+
+    local IFS=','
+    echo "${final[*]}"
+}
+
+ask_listen_config() {
+    local extra_allow bind_hosts
+    echo "Default access: localhost + private LAN (10/8, 172.16/12, 192.168/16)"
+    echo "Default listen: all interfaces (0.0.0.0)"
+    read -rp "Extra allowed IPs/CIDRs (optional, e.g. 203.0.113.10 or 192.168.111.0/24): " extra_allow
+    read -rp "Listen bind addresses [${DEFAULT_BIND_HOSTS}]: " bind_hosts
+    bind_hosts=$(normalize_bind_hosts "${bind_hosts:-$DEFAULT_BIND_HOSTS}")
+    local allow
+    allow=$(normalize_allow "$extra_allow")
+    printf '%s\n%s\n' "$bind_hosts" "$allow"
+}
+
+write_listen_conf() {
+    local hosts=${1:-$DEFAULT_BIND_HOSTS}
+    local allow=${2:-$DEFAULT_ALLOW}
+    mkdir -p "$INSTALL_DIR"
+    cat > "$LISTEN_CONF" << EOF
+# Agent Assistant listen config
+# hosts: bind addresses (0.0.0.0 = all interfaces)
+# allow: client IP/CIDR allowlist (127.0.0.1 and ::1 are always forced by the server)
+hosts=${hosts}
+allow=${allow}
+port=${DEFAULT_PORT}
+EOF
+    log "Wrote listen config: $LISTEN_CONF"
+    log "  bind:  $hosts:$DEFAULT_PORT"
+    log "  allow: $allow"
+}
+
+current_bind_hosts() {
+    if [[ -f "$LISTEN_CONF" ]]; then
+        local line
+        line=$(grep -E '^[[:space:]]*hosts=' "$LISTEN_CONF" | tail -1 | cut -d= -f2- | tr -d '[:space:]')
+        if [[ -n "$line" ]]; then
+            normalize_bind_hosts "$line"
+            return
+        fi
+    fi
+    echo "$DEFAULT_BIND_HOSTS"
+}
+
+current_allow() {
+    if [[ -f "$LISTEN_CONF" ]]; then
+        local line
+        line=$(grep -E '^[[:space:]]*allow=' "$LISTEN_CONF" | tail -1 | cut -d= -f2- | tr -d '[:space:]')
+        if [[ -n "$line" ]]; then
+            echo "$line"
+            return
+        fi
+    fi
+    echo "$DEFAULT_ALLOW"
+}
+
+configure_listen_addresses() {
+    echo "Current bind:  $(current_bind_hosts):$DEFAULT_PORT"
+    echo "Current allow: $(current_allow)"
+    local hosts allow
+    local cfg
+    cfg="$(ask_listen_config)"
+    hosts=$(printf '%s\n' "$cfg" | sed -n '1p')
+    allow=$(printf '%s\n' "$cfg" | sed -n '2p')
+    write_listen_conf "$hosts" "$allow"
+    run restart_service
+    log "Network access updated. Restarted service if running."
+}
+
 # ── Menu Functions ────────────────────────────────────────────────────────────
 show_menu() {
     echo ""
@@ -340,22 +513,26 @@ show_menu() {
     echo "   Location:     $INSTALL_DIR"
     echo "   Python:       $PYTHON_VERSION"
     echo "   Autostart:    $(check_autostart)"
+    echo "   Bind:         $(current_bind_hosts):$DEFAULT_PORT"
+    echo "   Allow:        $(current_allow)"
     echo ""
     echo "What would you like to do?"
     echo "  1. Update (pull latest code + upgrade packages)"
     echo "  2. Toggle autostart"
-    echo "  3. Upgrade Python"
-    echo "  4. Uninstall completely"
-    echo "  5. Exit"
+    echo "  3. Configure network access"
+    echo "  4. Upgrade Python"
+    echo "  5. Uninstall completely"
+    echo "  6. Exit"
     echo ""
     
-    read -rp "Choose an option [1-5]: " choice
+    read -rp "Choose an option [1-6]: " choice
     case "$choice" in
         1) update_app ;;
         2) toggle_autostart ;;
-        3) upgrade_python ;;
-        4) uninstall ;;
-        5) exit 0 ;;
+        3) configure_listen_addresses ;;
+        4) upgrade_python ;;
+        5) uninstall ;;
+        6) exit 0 ;;
         *) echo "Invalid option"; show_menu ;;
     esac
 }
@@ -529,19 +706,36 @@ main() {
     if [[ "$enable_autostart" == "true" && "$PLATFORM" == "darwin" ]]; then
         boot_without_login="$(ask_launchd_boot_without_login)"
     fi
+
+    local listen_hosts listen_allow
+    local listen_cfg
+    listen_cfg="$(ask_listen_config)"
+    listen_hosts=$(printf '%s\n' "$listen_cfg" | sed -n '1p')
+    listen_allow=$(printf '%s\n' "$listen_cfg" | sed -n '2p')
     
     # Execute installation steps
     download_python
     create_venv
     install_deps
     clone_app
+    write_listen_conf "$listen_hosts" "$listen_allow"
     configure_autostart "$enable_autostart" "$boot_without_login"
     setup_alias
     
     echo ""
     echo "✅ Installation complete!"
     echo ""
-    echo "  → http://localhost:$DEFAULT_PORT"
+    echo "  → http://127.0.0.1:$DEFAULT_PORT"
+    echo "  → LAN / private networks allowed by default"
+    if [[ "$listen_hosts" == "0.0.0.0" ]]; then
+        echo "  → Bound on all interfaces ($listen_hosts:$DEFAULT_PORT)"
+    else
+        local host
+        IFS=',' read -ra _hosts <<< "$listen_hosts"
+        for host in "${_hosts[@]}"; do
+            echo "  → http://${host}:$DEFAULT_PORT"
+        done
+    fi
     echo "  → Run 'source ~/.bashrc' or '~/.zshrc' to use 'agent-assistant' command"
     echo "  → For advanced management, re-run this installer"
 }
