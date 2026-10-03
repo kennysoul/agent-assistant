@@ -204,7 +204,7 @@ Notes:
 
 | Constant | Default | Purpose |
 |---|---|---|
-| `VERSION` | `'0.0.9'` | Shown in the page footer; bump when shipping UI/server changes |
+| `VERSION` | `'0.0.10'` | Shown in the page footer; bump when shipping UI/server changes |
 | `SAVE_DIR` | `'/tmp/clipboard'` | Upload storage (not persistent across reboot unless you change it) |
 | `MAX_PIXELS` | `1200` | OCR resize cap (longest side) |
 | `TEXT_PREVIEW_CHARS` | `200` | Preview length for text snippets |

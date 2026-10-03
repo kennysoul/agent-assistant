@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Agent Assistant — Clipboard Tool with OCR + Text Preview"""
-import os, time, re, json, mimetypes, threading, ipaddress
+import os, time, re, json, mimetypes, threading, ipaddress, socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 SAVE_DIR = '/tmp/clipboard'
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-VERSION = '0.0.9'
+VERSION = '0.0.10'
+HOSTNAME = socket.gethostname()
 
 _ocr_engine = None
 _ALLOW_NETWORKS = []
@@ -62,7 +63,7 @@ def is_text_file(fn):
 
 # ─── HTML ───────────────────────────────────────────────────────────────────
 HTML = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'index.html')).read()
-HTML = HTML.replace('__VERSION__', VERSION)
+HTML = HTML.replace('__VERSION__', VERSION).replace('__HOSTNAME__', HOSTNAME)
 
 # ─── HTTP Handler ────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
@@ -400,5 +401,4 @@ print('🔐 Allow: ' + ', '.join(str(n) for n in _ALLOW_NETWORKS))
 print('🔍 Loading OCR models...')
 _prewarm_ocr()
 print('🔍 OCR ready. Max resize: %dpx | Text preview: %d chars' % (MAX_PIXELS, TEXT_PREVIEW_CHARS))
-HTML = HTML.replace('__VERSION__', VERSION)
 start_servers(hosts, port)
