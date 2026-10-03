@@ -16,11 +16,15 @@ for arg in "$@"; do
 done
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-INSTALL_DIR="$HOME/opt/agent-assistant"
+# System-wide install path for every user (requires root/sudo to write).
+INSTALL_DIR="/opt/agent-assistant"
 PYTHON_RELEASE="20261001"
 PYTHON_VERSION="3.14.8"
 REPO_URL="https://github.com/kennysoul/agent-assistant"
 DEFAULT_PORT=9191
+LISTEN_CONF="$INSTALL_DIR/listen.conf"
+TARGET_USER=""
+TARGET_HOME=""
 
 # ── Utility Functions ─────────────────────────────────────────────────────────
 log() { echo "[$(date +%H:%M:%S)] $*"; }
@@ -52,6 +56,29 @@ run() {
     fi
 }
 
+# Write under /opt as root when needed.
+elevate() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        run "$@"
+    else
+        run sudo "$@"
+    fi
+}
+
+# Alias / LaunchAgent / user-unit paths belong to the invoking human user,
+# even when the script is run via sudo.
+resolve_identity() {
+    if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+        TARGET_USER="$SUDO_USER"
+    else
+        TARGET_USER="$(id -un)"
+    fi
+    TARGET_HOME=$(eval echo "~$TARGET_USER")
+    if [[ ! -d "$TARGET_HOME" ]]; then
+        TARGET_HOME="${HOME:-/root}"
+    fi
+}
+
 # ── Platform Detection ────────────────────────────────────────────────────────
 detect_platform() {
     PLATFORM=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -74,27 +101,27 @@ detect_platform() {
 # ── Installation Functions ────────────────────────────────────────────────────
 download_python() {
     log "Downloading Python (${PYTHON_VERSION})..."
-    mkdir -p "$INSTALL_DIR/python"
-    curl -sSL "$PYTHON_URL" | tar xz -C "$INSTALL_DIR/python/" --strip-components=1
+    elevate mkdir -p "$INSTALL_DIR/python"
+    curl -sSL "$PYTHON_URL" | elevate tar xz -C "$INSTALL_DIR/python/" --strip-components=1
     log "Python installed to $INSTALL_DIR/python/"
 }
 
 create_venv() {
     log "Creating virtual environment..."
-    run "$INSTALL_DIR/python/bin/python" -m venv "$INSTALL_DIR/venv"
-    run "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
+    elevate "$INSTALL_DIR/python/bin/python" -m venv "$INSTALL_DIR/venv"
+    elevate "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
 }
 
 install_deps() {
     log "Installing dependencies..."
-    run "$INSTALL_DIR/venv/bin/pip" install rapidocr_onnxruntime Pillow
+    elevate "$INSTALL_DIR/venv/bin/pip" install rapidocr_onnxruntime Pillow
 }
 
 clone_app() {
     log "Cloning application..."
-    mkdir -p "$INSTALL_DIR/app"
-    run curl -sSL "$REPO_URL/raw/main/server.py" -o "$INSTALL_DIR/app/server.py"
-    run curl -sSL "$REPO_URL/raw/main/index.html" -o "$INSTALL_DIR/app/index.html"
+    elevate mkdir -p "$INSTALL_DIR/app"
+    elevate curl -sSL "$REPO_URL/raw/main/server.py" -o "$INSTALL_DIR/app/server.py"
+    elevate curl -sSL "$REPO_URL/raw/main/index.html" -o "$INSTALL_DIR/app/index.html"
 }
 
 # ── Autostart Functions ───────────────────────────────────────────────────────
@@ -127,10 +154,12 @@ write_systemd_unit() {
     local unit_file="$1"
     local wanted_by="$2"
     local user_lines=""
-    # System units installed by a non-root user should run as that user.
-    if [[ "$(systemd_scope)" == "system" ]] && [[ "$(id -u)" -ne 0 ]]; then
-        user_lines="User=$(id -un)
-Group=$(id -gn)"
+    # System units should run as the installing human user when not root.
+    if [[ "$(systemd_scope)" == "system" ]] && [[ "${TARGET_USER:-root}" != "root" ]]; then
+        local group
+        group=$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")
+        user_lines="User=${TARGET_USER}
+Group=${group}"
     fi
 
     local content
@@ -155,9 +184,19 @@ EOF
 
     if [[ "$(id -u)" -ne 0 ]] && [[ "$unit_file" == /etc/* ]]; then
         printf '%s\n' "$content" | sudo tee "$unit_file" >/dev/null
-    else
-        mkdir -p "$(dirname "$unit_file")"
+    elif [[ "$unit_file" == /etc/* ]]; then
         printf '%s\n' "$content" > "$unit_file"
+    else
+        # user unit under TARGET_HOME
+        local dir
+        dir=$(dirname "$unit_file")
+        if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+            sudo -u "$TARGET_USER" mkdir -p "$dir"
+            printf '%s\n' "$content" | sudo -u "$TARGET_USER" tee "$unit_file" >/dev/null
+        else
+            mkdir -p "$dir"
+            printf '%s\n' "$content" > "$unit_file"
+        fi
     fi
 }
 
@@ -189,12 +228,14 @@ write_launchd_plist() {
     local as_daemon="$2"
     local user_keys=""
 
-    if [[ "$as_daemon" == "true" ]] && [[ "$(id -u)" -ne 0 ]]; then
+    if [[ "$as_daemon" == "true" ]] && [[ "${TARGET_USER:-root}" != "root" ]]; then
+        local group
+        group=$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")
         user_keys="
     <key>UserName</key>
-    <string>$(id -un)</string>
+    <string>${TARGET_USER}</string>
     <key>GroupName</key>
-    <string>$(id -gn)</string>"
+    <string>${group}</string>"
     fi
 
     local content
@@ -232,19 +273,37 @@ EOF
             sudo chmod 644 "$plist_path"
         fi
     else
-        mkdir -p "$(dirname "$plist_path")"
-        printf '%s\n' "$content" > "$plist_path"
-        chmod 644 "$plist_path"
+        local dir
+        dir=$(dirname "$plist_path")
+        if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+            sudo -u "$TARGET_USER" mkdir -p "$dir"
+            printf '%s\n' "$content" | sudo -u "$TARGET_USER" tee "$plist_path" >/dev/null
+            sudo -u "$TARGET_USER" chmod 644 "$plist_path"
+        else
+            mkdir -p "$dir"
+            printf '%s\n' "$content" > "$plist_path"
+            chmod 644 "$plist_path"
+        fi
     fi
 }
 
 launchd_load_agent() {
     local plist="$1"
-    if launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null; then
-        return 0
+    local uid
+    uid=$(id -u "$TARGET_USER" 2>/dev/null || id -u)
+    if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+        if sudo -u "$TARGET_USER" launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null; then
+            return 0
+        fi
+        run sudo -u "$TARGET_USER" launchctl unload "$plist" 2>/dev/null || true
+        run sudo -u "$TARGET_USER" launchctl load "$plist"
+    else
+        if launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null; then
+            return 0
+        fi
+        run launchctl unload "$plist" 2>/dev/null || true
+        run launchctl load "$plist"
     fi
-    run launchctl unload "$plist" 2>/dev/null || true
-    run launchctl load "$plist"
 }
 
 launchd_load_daemon() {
@@ -265,11 +324,19 @@ launchd_load_daemon() {
 }
 
 launchd_unload_agent() {
-    local plist="$HOME/Library/LaunchAgents/com.agent.assistant.plist"
+    local plist="${TARGET_HOME:-$HOME}/Library/LaunchAgents/com.agent.assistant.plist"
     [[ -f "$plist" ]] || return 0
-    launchctl bootout "gui/$(id -u)/com.agent.assistant" 2>/dev/null || true
-    launchctl unload "$plist" 2>/dev/null || true
-    rm -f "$plist"
+    local uid
+    uid=$(id -u "$TARGET_USER" 2>/dev/null || id -u)
+    if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+        sudo -u "$TARGET_USER" launchctl bootout "gui/$uid/com.agent.assistant" 2>/dev/null || true
+        sudo -u "$TARGET_USER" launchctl unload "$plist" 2>/dev/null || true
+        sudo -u "$TARGET_USER" rm -f "$plist"
+    else
+        launchctl bootout "gui/$uid/com.agent.assistant" 2>/dev/null || true
+        launchctl unload "$plist" 2>/dev/null || true
+        rm -f "$plist"
+    fi
 }
 
 launchd_unload_daemon() {
@@ -302,7 +369,7 @@ configure_launchd() {
         launchd_load_daemon "$plist"
         log "Configured LaunchDaemon autostart (boot without login)"
     else
-        local plist="$HOME/Library/LaunchAgents/com.agent.assistant.plist"
+        local plist="${TARGET_HOME}/Library/LaunchAgents/com.agent.assistant.plist"
         write_launchd_plist "$plist" "false"
         launchd_load_agent "$plist"
         log "Configured LaunchAgent autostart (after user login)"
@@ -319,7 +386,7 @@ configure_systemd() {
         wanted_by="multi-user.target"
         log "No systemd user bus (or running as root) — using system service"
     else
-        unit_file="$HOME/.config/systemd/user/agent-assistant.service"
+        unit_file="${TARGET_HOME}/.config/systemd/user/agent-assistant.service"
         wanted_by="default.target"
     fi
 
@@ -333,50 +400,74 @@ configure_systemd() {
 install_manager_script() {
     # pass "remote" to always refresh from GitHub (used by Update)
     local mode=${1:-local}
-    mkdir -p "$INSTALL_DIR"
+    elevate mkdir -p "$INSTALL_DIR"
     local dest="$INSTALL_DIR/install.sh"
     local src="${BASH_SOURCE[0]:-}"
 
     if [[ "$mode" == "remote" ]]; then
-        run curl -sSL "$REPO_URL/raw/main/install.sh" -o "$dest"
+        elevate curl -sSL "$REPO_URL/raw/main/install.sh" -o "$dest"
     elif [[ -n "$src" && -f "$src" && -r "$src" ]]; then
         if [[ "$src" -ef "$dest" ]]; then
             log "Manager script already in place: $dest"
-            chmod +x "$dest"
+            elevate chmod +x "$dest"
             return
         fi
-        cp "$src" "$dest"
+        elevate cp "$src" "$dest"
     else
-        run curl -sSL "$REPO_URL/raw/main/install.sh" -o "$dest"
+        elevate curl -sSL "$REPO_URL/raw/main/install.sh" -o "$dest"
     fi
 
-    chmod +x "$dest"
+    elevate chmod +x "$dest"
     log "Installed manager script: $dest"
 }
 
 setup_alias() {
+    resolve_identity
     local shell_config=""
-    case "${SHELL##*/}" in
-        bash) shell_config="$HOME/.bashrc" ;;
-        zsh) shell_config="$HOME/.zshrc" ;;
-        *) log "Unsupported shell for alias setup: $SHELL" ; return ;;
-    esac
+    if [[ -f "$TARGET_HOME/.zshrc" ]]; then
+        shell_config="$TARGET_HOME/.zshrc"
+    elif [[ -f "$TARGET_HOME/.bashrc" ]]; then
+        shell_config="$TARGET_HOME/.bashrc"
+    else
+        case "${SHELL##*/}" in
+            bash) shell_config="$TARGET_HOME/.bashrc" ;;
+            *) shell_config="$TARGET_HOME/.zshrc" ;;
+        esac
+    fi
 
     install_manager_script
 
     local alias_line="alias agent-assistant='bash \"$INSTALL_DIR/install.sh\"'"
 
     if [[ -f "$shell_config" ]]; then
-        # Replace any previous alias / marker block.
-        sed -i.bak '/# Agent Assistant CLI/,+1d' "$shell_config" 2>/dev/null || true
-        sed -i.bak '/alias agent-assistant=/d' "$shell_config" 2>/dev/null || true
+        if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+            sudo -u "$TARGET_USER" sed -i.bak '/# Agent Assistant CLI/,+1d' "$shell_config" 2>/dev/null || true
+            sudo -u "$TARGET_USER" sed -i.bak '/alias agent-assistant=/d' "$shell_config" 2>/dev/null || true
+        else
+            sed -i.bak '/# Agent Assistant CLI/,+1d' "$shell_config" 2>/dev/null || true
+            sed -i.bak '/alias agent-assistant=/d' "$shell_config" 2>/dev/null || true
+        fi
+    else
+        if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+            sudo -u "$TARGET_USER" touch "$shell_config"
+        else
+            touch "$shell_config"
+        fi
     fi
 
-    {
-        echo ""
-        echo "# Agent Assistant CLI"
-        echo "$alias_line"
-    } >> "$shell_config"
+    if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+        {
+            echo ""
+            echo "# Agent Assistant CLI"
+            echo "$alias_line"
+        } | sudo -u "$TARGET_USER" tee -a "$shell_config" >/dev/null
+    else
+        {
+            echo ""
+            echo "# Agent Assistant CLI"
+            echo "$alias_line"
+        } >> "$shell_config"
+    fi
 
     log "Added alias to $shell_config (opens management menu)"
     log "Run 'source $shell_config' or restart your terminal to use 'agent-assistant'"
@@ -385,7 +476,6 @@ setup_alias() {
 # ── Listen / allowlist config ─────────────────────────────────────────────────
 # Default: bind 0.0.0.0; allow localhost + private LAN.
 # 127.0.0.1 / ::1 can never be removed from the allowlist.
-LISTEN_CONF="$INSTALL_DIR/listen.conf"
 DEFAULT_BIND_HOSTS="0.0.0.0"
 DEFAULT_ALLOW="127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
@@ -504,8 +594,9 @@ ask_listen_config() {
 write_listen_conf() {
     local hosts=${1:-$DEFAULT_BIND_HOSTS}
     local allow=${2:-$DEFAULT_ALLOW}
-    mkdir -p "$INSTALL_DIR"
-    cat > "$LISTEN_CONF" << EOF
+    elevate mkdir -p "$INSTALL_DIR"
+    local content
+    content=$(cat << EOF
 # Agent Assistant listen config
 # hosts: bind addresses (0.0.0.0 = all interfaces)
 # allow: client IP/CIDR allowlist (127.0.0.1 and ::1 are always forced by the server)
@@ -513,6 +604,12 @@ hosts=${hosts}
 allow=${allow}
 port=${DEFAULT_PORT}
 EOF
+)
+    if [[ "$(id -u)" -eq 0 ]]; then
+        printf '%s\n' "$content" > "$LISTEN_CONF"
+    else
+        printf '%s\n' "$content" | sudo tee "$LISTEN_CONF" >/dev/null
+    fi
     log "Wrote listen config: $LISTEN_CONF"
     log "  bind:  $hosts:$DEFAULT_PORT"
     log "  allow: $allow"
@@ -598,11 +695,14 @@ run_foreground() {
 check_autostart() {
     case "$PLATFORM" in
         darwin)
+            local agent_plist="${TARGET_HOME:-$HOME}/Library/LaunchAgents/com.agent.assistant.plist"
+            local uid
+            uid=$(id -u "${TARGET_USER:-$USER}" 2>/dev/null || id -u)
             if launchctl print "system/com.agent.assistant" &>/dev/null \
                 || [[ -f /Library/LaunchDaemons/com.agent.assistant.plist ]]; then
                 echo "enabled (boot)"
-            elif launchctl print "gui/$(id -u)/com.agent.assistant" &>/dev/null \
-                || [[ -f "$HOME/Library/LaunchAgents/com.agent.assistant.plist" ]]; then
+            elif launchctl print "gui/$uid/com.agent.assistant" &>/dev/null \
+                || [[ -f "$agent_plist" ]]; then
                 echo "enabled (login)"
             else
                 echo "disabled"
@@ -623,21 +723,20 @@ check_autostart() {
 
 update_app() {
     log "Updating application..."
-    # For now, we'll just reinstall since we don't have git repo locally
-    run clone_app
-    run "$INSTALL_DIR/venv/bin/pip" install --upgrade rapidocr_onnxruntime Pillow
+    clone_app
+    elevate "$INSTALL_DIR/venv/bin/pip" install --upgrade rapidocr_onnxruntime Pillow
     install_manager_script remote
-    run restart_service
+    restart_service
     log "Update complete!"
 }
 
 toggle_autostart() {
     local current=$(check_autostart)
     if [[ "$current" != "disabled" ]]; then
-        run disable_autostart
+        disable_autostart
         log "Autostart disabled"
     else
-        run enable_autostart
+        enable_autostart
         log "Autostart enabled"
     fi
 }
@@ -656,7 +755,7 @@ disable_autostart() {
             # Clean both scopes in case a previous install left the other behind.
             systemctl --user stop agent-assistant.service 2>/dev/null || true
             systemctl --user disable agent-assistant.service 2>/dev/null || true
-            rm -f "$HOME/.config/systemd/user/agent-assistant.service"
+            rm -f "${TARGET_HOME:-$HOME}/.config/systemd/user/agent-assistant.service"
             systemctl --user daemon-reload 2>/dev/null || true
 
             if [[ "$(id -u)" -eq 0 ]]; then
@@ -677,6 +776,8 @@ disable_autostart() {
 restart_service() {
     case "$PLATFORM" in
         darwin)
+            local uid
+            uid=$(id -u "${TARGET_USER:-$USER}" 2>/dev/null || id -u)
             if [[ -f /Library/LaunchDaemons/com.agent.assistant.plist ]]; then
                 if [[ "$(id -u)" -eq 0 ]]; then
                     run launchctl kickstart -k system/com.agent.assistant 2>/dev/null \
@@ -688,7 +789,7 @@ restart_service() {
                              run sudo launchctl start com.agent.assistant 2>/dev/null || true; }
                 fi
             else
-                run launchctl kickstart -k "gui/$(id -u)/com.agent.assistant" 2>/dev/null \
+                run launchctl kickstart -k "gui/$uid/com.agent.assistant" 2>/dev/null \
                     || { run launchctl stop com.agent.assistant 2>/dev/null || true
                          run launchctl start com.agent.assistant 2>/dev/null || true; }
             fi
@@ -702,19 +803,19 @@ restart_service() {
 upgrade_python() {
     local backup_dir="$INSTALL_DIR/python_backup_$(date +%s)"
     log "Backing up current Python to $backup_dir..."
-    run cp -r "$INSTALL_DIR/python" "$backup_dir"
+    elevate cp -r "$INSTALL_DIR/python" "$backup_dir"
     
     log "Upgrading Python..."
-    rm -rf "$INSTALL_DIR/python"
+    elevate rm -rf "$INSTALL_DIR/python"
     
-    if run download_python && run create_venv && run install_deps; then
-        run rm -rf "$backup_dir"
+    if download_python && create_venv && install_deps; then
+        elevate rm -rf "$backup_dir"
         log "Python upgrade successful!"
-        run restart_service
+        restart_service
     else
         log "Python upgrade failed, restoring backup..."
-    run rm -rf "$INSTALL_DIR/python"
-        run mv "$backup_dir" "$INSTALL_DIR/python"
+        elevate rm -rf "$INSTALL_DIR/python"
+        elevate mv "$backup_dir" "$INSTALL_DIR/python"
         err "Python upgrade failed, restored to previous version"
     fi
 }
@@ -726,13 +827,20 @@ uninstall() {
     
     log "Uninstalling..."
     disable_autostart
-    run rm -rf "$INSTALL_DIR"
-    run rm -rf /tmp/clipboard
+    elevate rm -rf "$INSTALL_DIR"
+    elevate rm -rf /tmp/clipboard
     
-    # Remove alias from shell configs
-    for config in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    # Remove alias from the target user's shell configs
+    resolve_identity
+    for config in "$TARGET_HOME/.bashrc" "$TARGET_HOME/.zshrc"; do
         if [[ -f "$config" ]]; then
-            sed -i.bak '/# Agent Assistant CLI/,+2d' "$config"
+            if [[ "$(id -u)" -eq 0 && "$TARGET_USER" != "root" ]]; then
+                sudo -u "$TARGET_USER" sed -i.bak '/# Agent Assistant CLI/,+2d' "$config" 2>/dev/null || true
+                sudo -u "$TARGET_USER" sed -i.bak '/alias agent-assistant=/d' "$config" 2>/dev/null || true
+            else
+                sed -i.bak '/# Agent Assistant CLI/,+2d' "$config" 2>/dev/null || true
+                sed -i.bak '/alias agent-assistant=/d' "$config" 2>/dev/null || true
+            fi
         fi
     done
     
@@ -742,6 +850,7 @@ uninstall() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
     detect_platform
+    resolve_identity
     
     # Check if already installed
     if [[ -x "$INSTALL_DIR/python/bin/python" ]]; then
@@ -754,8 +863,13 @@ main() {
     echo "────────────────────────────────"
     echo "Platform:   $PLATFORM/$ARCH"
     echo "Python:     $PYTHON_VERSION (standalone)"
+    echo "Install to: $INSTALL_DIR"
     echo ""
     
+    if [[ "$(id -u)" -ne 0 ]]; then
+        log "Writing to $INSTALL_DIR requires sudo privileges"
+    fi
+
     read_input "Enable autostart? [Y/n]: " enable_autostart
     enable_autostart=${enable_autostart:-Y}
     # Convert to lowercase manually for compatibility
@@ -796,6 +910,7 @@ main() {
             echo "  → http://${host}:$DEFAULT_PORT"
         done
     fi
+    echo "  → Install path: $INSTALL_DIR"
     echo "  → Run 'source ~/.zshrc' (or ~/.bashrc), then 'agent-assistant' for the management menu"
     echo "  → Or: bash \"$INSTALL_DIR/install.sh\""
 }

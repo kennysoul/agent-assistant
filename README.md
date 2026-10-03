@@ -1,4 +1,4 @@
-> **Migration note:** If you previously installed Agent Assistant by cloning this git repo and running `server.py` manually (or an older layout under `~/opt/agent-assistant` with files at the install root), **uninstall / stop that copy first, then reinstall with the one-line installer below**. Mixing the old layout with the new installer will not upgrade cleanly.
+> **Migration note:** If you previously installed Agent Assistant by cloning this git repo and running `server.py` manually, or with an older installer under `~/opt/agent-assistant`, **uninstall / stop that copy first, then reinstall with the one-line installer below**. The current installer always uses `/opt/agent-assistant` (needs sudo/root). Mixing old layouts with the new installer will not upgrade cleanly.
 
 # Agent Assistant — Cloud Clipboard with OCR
 
@@ -51,7 +51,8 @@ powershell -Command "iex (irm https://raw.githubusercontent.com/kennysoul/agent-
 
 ### What the Unix installer does
 
-Install root: `~/opt/agent-assistant`
+Install root (all users, including root): `/opt/agent-assistant`  
+Writing there needs root/sudo.
 
 | Path | Purpose |
 |---|---|
@@ -70,7 +71,7 @@ During a fresh install you will be asked:
 It also installs a manager script and shell alias:
 
 ```bash
-alias agent-assistant='bash "~/opt/agent-assistant/install.sh"'
+alias agent-assistant='bash "/opt/agent-assistant/install.sh"'
 ```
 
 Running `agent-assistant` opens the **management menu** (update, autostart, network, etc.). It does **not** start the HTTP server in the foreground — the service is meant to run via autostart (or menu option “Run server in foreground”).
@@ -79,7 +80,7 @@ After install, open `http://127.0.0.1:9191/`.
 
 ### Re-run installer / `agent-assistant` menu
 
-If `~/opt/agent-assistant/python/bin/python` already exists, `agent-assistant` (or re-running `install.sh`) opens a menu:
+If `/opt/agent-assistant/python/bin/python` already exists, `agent-assistant` (or re-running `install.sh`) opens a menu:
 
 1. Update (pull latest `server.py` / `index.html` + upgrade packages)
 2. Toggle autostart
@@ -112,7 +113,7 @@ By default the server:
 
 So “listening on all interfaces” does **not** mean “open to the whole internet”.
 
-Example `~/opt/agent-assistant/listen.conf`:
+Example `/opt/agent-assistant/listen.conf`:
 
 ```ini
 # hosts: bind addresses (0.0.0.0 = all interfaces)
@@ -250,7 +251,7 @@ agent-assistant/
 Installed layout (Unix installer):
 
 ```
-~/opt/agent-assistant/
+/opt/agent-assistant/
 ├── python/         # embedded Python
 ├── venv/           # dependencies
 ├── app/
