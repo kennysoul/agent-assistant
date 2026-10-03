@@ -28,6 +28,32 @@ A simple self-hosted cloud clipboard that lets you paste text, screenshots, or f
 
 ---
 
+## Quick Installation (Recommended)
+
+### One-line Install (Cross-platform)
+
+Install Agent Assistant with a single command that automatically handles Python dependencies and system integration:
+
+**Linux/macOS:**
+```bash
+curl -sSL https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+powershell -Command "iex (irm https://raw.githubusercontent.com/kennysoul/agent-assistant/main/install.ps1)"
+```
+
+This installer will:
+- Automatically download and configure an embedded Python runtime
+- Install all dependencies (rapidocr_onnxruntime, Pillow)
+- Set up autostart on boot (systemd/launchd/Scheduled Task)
+- Add `agent-assistant` command to your shell
+
+After installation, visit `http://localhost:9191` to use your cloud clipboard!
+
+---
+
 ## Deployment
 
 ### Option A — quick start (foreground)
@@ -91,6 +117,26 @@ Logs: `journalctl -u agent-assistant.service -f`
 
 ### Option C — behind a reverse proxy (HTTPS)
 
+### Managing with the CLI Tool
+
+After installation, you can manage Agent Assistant using the `agent-assistant` command:
+
+```bash
+# Check status
+agent-assistant status
+
+# Start/stop/restart service
+agent-assistant start
+agent-assistant stop
+agent-assistant restart
+
+# Update to latest version
+agent-assistant update
+
+# Uninstall completely
+agent-assistant uninstall
+```
+
 If you expose port 9191 through Caddy / Nginx / Cloudflare Tunnel, just proxy the port. The page sends `Cache-Control: no-store` so the proxy won't cache it. If the proxy terminates TLS, the browser will allow `navigator.clipboard.writeText` — useful if you depend on the copy button.
 
 Example Caddy snippet:
@@ -146,6 +192,9 @@ Expires: 0
 agent-assistant/
 ├── server.py          # Pure-Python HTTP handler (~10 KB)
 ├── index.html         # UI: HTML + CSS + JS (~20 KB)
+├── install.sh         # Unix one-line installer
+├── install.ps1        # Windows PowerShell installer
+├── agent-cli.py       # Management CLI tool
 ├── README.md          # this file
 └── .gitignore         # Python bytecode, backup files
 ```
