@@ -80,6 +80,69 @@ clone_app() {
 }
 
 # ── Autostart Functions ───────────────────────────────────────────────────────
+# Prefer systemd --user; fall back to system service when root or no user bus.
+systemd_scope() {
+    if [[ "$(id -u)" -eq 0 ]]; then
+        echo "system"
+        return
+    fi
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]] && systemctl --user show-environment &>/dev/null; then
+        echo "user"
+        return
+    fi
+    echo "system"
+}
+
+systemd_ctl() {
+    if [[ "$(systemd_scope)" == "system" ]]; then
+        if [[ "$(id -u)" -eq 0 ]]; then
+            systemctl "$@"
+        else
+            sudo systemctl "$@"
+        fi
+    else
+        systemctl --user "$@"
+    fi
+}
+
+write_systemd_unit() {
+    local unit_file="$1"
+    local wanted_by="$2"
+    local user_lines=""
+    # System units installed by a non-root user should run as that user.
+    if [[ "$(systemd_scope)" == "system" ]] && [[ "$(id -u)" -ne 0 ]]; then
+        user_lines="User=$(id -un)
+Group=$(id -gn)"
+    fi
+
+    local content
+    content=$(cat << EOF
+[Unit]
+Description=Agent Assistant — Cloud Clipboard + OCR
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$INSTALL_DIR/app
+ExecStart=$INSTALL_DIR/venv/bin/python server.py
+Restart=on-failure
+RestartSec=5
+Environment=OMP_NUM_THREADS=4
+${user_lines}
+
+[Install]
+WantedBy=${wanted_by}
+EOF
+)
+
+    if [[ "$(id -u)" -ne 0 ]] && [[ "$unit_file" == /etc/* ]]; then
+        printf '%s\n' "$content" | sudo tee "$unit_file" >/dev/null
+    else
+        mkdir -p "$(dirname "$unit_file")"
+        printf '%s\n' "$content" > "$unit_file"
+    fi
+}
+
 configure_autostart() {
     local enable=${1:-true}
     [[ "$enable" != "true" ]] && return
@@ -126,30 +189,23 @@ EOF
 }
 
 configure_systemd() {
-    local unit_dir="$HOME/.config/systemd/user"
-    local unit_file="$unit_dir/agent-assistant.service"
-    mkdir -p "$unit_dir"
-    
-    cat > "$unit_file" << EOF
-[Unit]
-Description=Agent Assistant — Cloud Clipboard + OCR
-After=network.target
+    local scope
+    scope="$(systemd_scope)"
+    local unit_file wanted_by
 
-[Service]
-Type=simple
-WorkingDirectory=$INSTALL_DIR/app
-ExecStart=$INSTALL_DIR/venv/bin/python server.py
-Restart=on-failure
-RestartSec=5
-Environment=OMP_NUM_THREADS=4
+    if [[ "$scope" == "system" ]]; then
+        unit_file="/etc/systemd/system/agent-assistant.service"
+        wanted_by="multi-user.target"
+        log "No systemd user bus (or running as root) — using system service"
+    else
+        unit_file="$HOME/.config/systemd/user/agent-assistant.service"
+        wanted_by="default.target"
+    fi
 
-[Install]
-WantedBy=default.target
-EOF
-    
-    run systemctl --user daemon-reload
-    run systemctl --user enable --now agent-assistant.service
-    log "Configured systemd autostart"
+    write_systemd_unit "$unit_file" "$wanted_by"
+    run systemd_ctl daemon-reload
+    run systemd_ctl enable --now agent-assistant.service
+    log "Configured systemd autostart ($scope)"
 }
 
 # ── Alias Functions ───────────────────────────────────────────────────────────
@@ -211,7 +267,7 @@ check_autostart() {
             fi
             ;;
         linux)
-            if systemctl --user is-enabled agent-assistant.service &>/dev/null; then
+            if systemd_ctl is-enabled agent-assistant.service &>/dev/null; then
                 echo "enabled"
             else
                 echo "disabled"
@@ -255,10 +311,23 @@ disable_autostart() {
             rm -f "$plist"
             ;;
         linux)
-    run systemctl --user stop agent-assistant.service 2>/dev/null || true
-    run systemctl --user disable agent-assistant.service 2>/dev/null || true
+            # Clean both scopes in case a previous install left the other behind.
+            systemctl --user stop agent-assistant.service 2>/dev/null || true
+            systemctl --user disable agent-assistant.service 2>/dev/null || true
             rm -f "$HOME/.config/systemd/user/agent-assistant.service"
-            run systemctl --user daemon-reload
+            systemctl --user daemon-reload 2>/dev/null || true
+
+            if [[ "$(id -u)" -eq 0 ]]; then
+                systemctl stop agent-assistant.service 2>/dev/null || true
+                systemctl disable agent-assistant.service 2>/dev/null || true
+                rm -f /etc/systemd/system/agent-assistant.service
+                systemctl daemon-reload 2>/dev/null || true
+            else
+                sudo systemctl stop agent-assistant.service 2>/dev/null || true
+                sudo systemctl disable agent-assistant.service 2>/dev/null || true
+                sudo rm -f /etc/systemd/system/agent-assistant.service
+                sudo systemctl daemon-reload 2>/dev/null || true
+            fi
             ;;
     esac
 }
@@ -266,11 +335,11 @@ disable_autostart() {
 restart_service() {
     case "$PLATFORM" in
         darwin)
-    run launchctl stop com.agent.assistant 2>/dev/null || true
-    run launchctl start com.agent.assistant 2>/dev/null || true
+            run launchctl stop com.agent.assistant 2>/dev/null || true
+            run launchctl start com.agent.assistant 2>/dev/null || true
             ;;
         linux)
-            run systemctl --user restart agent-assistant.service 2>/dev/null || true
+            run systemd_ctl restart agent-assistant.service 2>/dev/null || true
             ;;
     esac
 }
@@ -319,7 +388,7 @@ main() {
     detect_platform
     
     # Check if already installed
-    if [[ -d "$INSTALL_DIR/python/bin/python" ]]; then
+    if [[ -x "$INSTALL_DIR/python/bin/python" ]]; then
         show_menu
         exit 0
     fi
