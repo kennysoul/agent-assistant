@@ -187,12 +187,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {'success': False, 'error': 'Not an image file'}); return
         try:
             from PIL import Image as PILImage
+            import numpy as np
             ocr = get_ocr()
-            img = PILImage.open(real)
+            img = PILImage.open(real).convert('RGB')
             w, h = img.size
             if max(w, h) > MAX_PIXELS:
                 img.thumbnail((MAX_PIXELS, MAX_PIXELS), PILImage.LANCZOS)
-            result, elapse = ocr(img)
+            result, elapse = ocr(np.asarray(img))
             if result is None or len(result) == 0:
                 self._json(200, {'success': True, 'text': '(未识别到文字)'}); return
             from collections import defaultdict
